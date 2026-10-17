@@ -73,11 +73,31 @@ def load_profile(name: str | None = None, path: Path = CONFIG_FILE) -> dict:
     return profile
 
 
+def read_state() -> dict:
+    import json
+
+    try:
+        return json.loads(STATE_FILE.read_text())
+    except Exception:
+        return {}
+
+
+def update_state(**changes) -> None:
+    """Merge into ~/.raven/state.json (persona, project folder, ...)."""
+    import json
+
+    HOME.mkdir(parents=True, exist_ok=True)
+    state = read_state()
+    state.update(changes)
+    STATE_FILE.write_text(json.dumps(state))
+
+
 def user_identity() -> tuple[str, str]:
     return os.environ.get("RAVEN_USER_NAME", ""), os.environ.get("RAVEN_USER_PRONOUNS", "")
 
 
-def resolve_model(name_or_path: str, models_dir: Path = MODELS_DIR) -> Path:
+def resolve_model(name_or_path: str, models_dir: Path | None = None) -> Path:
+    models_dir = models_dir or MODELS_DIR  # looked up per call, not frozen at import
     p = Path(name_or_path).expanduser()
     if p.is_absolute() and p.exists():
         return p

@@ -267,7 +267,7 @@ class Assistant:
         info = w.session_info()
         if not info:
             raise RuntimeError("There's no Claude session yet. Send a request first.")
-        cmd = terminal.claude_command(info["cwd"], info["session_id"])  # fail before pausing anything
+        cmd = terminal.claude_command(info["cwd"], info["session_id"], info.get("claude_path"))  # fail before pausing anything
         self.barge_in()
         w.detach()
         self._working, self._activity = False, []

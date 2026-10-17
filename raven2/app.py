@@ -8,12 +8,14 @@ from .core import Assistant, Services
 
 
 def build(profile_name: str | None = None, persona_id: str | None = None, log=print,
-          worker: str | None = None, cwd: str | None = None) -> Assistant:
+          worker: str | None = None, cwd: str | None = None, claude_path: str | None = None) -> Assistant:
     profile = config.load_profile(profile_name)
     if worker:
         profile["worker"] = {**profile["worker"], "backend": worker}
     if cwd:
         profile["worker"]["cwd"] = cwd
+    if claude_path:
+        profile["worker"]["cli_path"] = claude_path
 
     def make(kind: str):
         spec = dict(profile[kind])

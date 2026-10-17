@@ -82,13 +82,14 @@ RAVEN_TOOLS = ("mcp__raven__list_personas", "mcp__raven__set_persona")
 
 
 class ClaudeWorker:
-    def __init__(self, cwd: str = ".", model: str | None = None, permission_mode: str | None = None, **_):
+    def __init__(self, cwd: str = ".", model: str | None = None, permission_mode: str | None = None,
+                 cli_path: str | None = None, **_):
         import os
 
         self._cwd = os.path.abspath(os.path.expanduser(cwd))
         if not os.path.isdir(self._cwd):  # fail at startup, not after the user has already spoken
             raise FileNotFoundError(f"working directory does not exist: {self._cwd}")
-        self._model, self._mode = model, permission_mode
+        self._model, self._mode, self._cli_path = model, permission_mode, cli_path
         self.on_event = None
         self.controls = None
         self._loop = asyncio.new_event_loop()
@@ -118,7 +119,8 @@ class ClaudeWorker:
         return True
 
     def session_info(self) -> dict | None:
-        return {"session_id": self.session_id, "cwd": self._cwd} if self.session_id else None
+        return ({"session_id": self.session_id, "cwd": self._cwd, "claude_path": self._cli_path}
+                if self.session_id else None)
 
     def detach(self) -> None:
         """Hand the session to a human terminal: stop any running turn and release the session so two
@@ -172,6 +174,7 @@ class ClaudeWorker:
                 extra = {"mcp_servers": {"raven": self._raven_server()}}
             opts = ClaudeAgentOptions(
                 cwd=self._cwd,
+                cli_path=self._cli_path,
                 model=self._model,
                 permission_mode=self._mode,
                 can_use_tool=self._can_use_tool,
