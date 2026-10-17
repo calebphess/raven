@@ -10,7 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable
 
-from . import approvals, commands, config, packs, personas as P
+from . import approvals, commands, config, packs, personas as P, terminal
 from .brain import Brain, verbatim_chunks
 from .interfaces import STT, TTS, Audio, AssetMissing, AudioOut, Worker, WorkerEvent
 
@@ -89,6 +89,8 @@ class Assistant:
         if cmd:
             return self._run_command(cmd)
         w = self.svc.worker
+        if getattr(w, "detached", False):  # a terminal owns the session; never write to it from here
+            return self.say("Claude is open in the terminal. Tell me to hand it back when you're done.")
         if w.has_pending():
             return self._answer_pending(text)
         w.send(text)  # always forwarded (interrupting any running turn); the worker decides what to do
@@ -206,9 +208,50 @@ class Assistant:
             return
         if cmd.kind == "list":
             return self.say(commands.describe_list(self.personas, self.persona.id))
+        if cmd.kind == "open_terminal":
+            return self._say_after(self.open_manual_session, "Opening Claude in the terminal.")
+        if cmd.kind == "handback":
+            return self._say_after(self.hand_back, "Back in control.")
         if cmd.kind == "switch" and cmd.persona:
             self.switch(cmd.persona)
             self.say(cmd.persona.greeting or f"{cmd.persona.name} here.")
+
+    def _say_after(self, action: Callable[[], object], ok: str) -> None:
+        try:
+            action()
+        except Exception as e:
+            self.log(f"[error] {e}")
+            return self.say(f"I couldn't do that. {e}")
+        self.say(ok)
+
+    # ── manual takeover: the user drives the Claude session by hand in a terminal ──
+    @property
+    def manual(self) -> bool:
+        return bool(getattr(self.svc.worker, "detached", False))
+
+    def open_manual_session(self) -> dict:
+        """Pause the background worker, release the session to a real terminal, and open it there.
+        Raven forwards nothing while the terminal owns the session; hand_back() resumes it."""
+        w = self.svc.worker
+        info = w.session_info()
+        if not info:
+            raise RuntimeError("There's no Claude session yet. Send a request first.")
+        cmd = terminal.claude_command(info["cwd"], info["session_id"])  # fail before pausing anything
+        self.barge_in()
+        w.detach()
+        self._working, self._activity = False, []
+        self._st("manual")
+        try:
+            terminal.open_in_terminal(cmd, config.load_file().get("terminal", "Terminal"))
+        except Exception:
+            w.attach()  # the terminal never opened; don't leave Raven paused
+            self._st("idle")
+            raise
+        return info
+
+    def hand_back(self) -> None:
+        self.svc.worker.attach()
+        self._st("idle")
 
     def prepare(self, persona: P.Persona | None = None) -> None:
         """Download/load the voice now, so progress shows before the first reply."""
@@ -314,7 +357,12 @@ class Assistant:
                 close()
 
     def wait(self) -> None:
-        t = self._thread
-        if t:
-            t.join()
+        """Block until everything queued to be spoken has finished. Speech threads can start further
+        speech (Claude answering while a progress line generates), so keep joining until none is newer."""
+        while True:
+            t = self._thread
+            if t:
+                t.join()
+            if self._thread is t:
+                break
         self.svc.out.wait()

@@ -97,6 +97,9 @@ class ClaudeWorker:
         self._turn = 0
         self._task: asyncio.Task | None = None
         self._pending: asyncio.Future | None = None
+        self.session_id: str | None = None   # learned from the first response; needed to open it in a terminal
+        self.detached = False                # True while a terminal owns the session
+        self._resume_next = False
         self._always: set[str] = set()
 
     # ── public (thread-safe) ──
@@ -115,6 +118,29 @@ class ClaudeWorker:
             return False
         self._loop.call_soon_threadsafe(lambda: fut.done() or fut.set_result((decision, text)))
         return True
+
+    def session_info(self) -> dict | None:
+        return {"session_id": self.session_id, "cwd": self._cwd} if self.session_id else None
+
+    def detach(self) -> None:
+        """Hand the session to a human terminal: stop any running turn and release the session so two
+        processes never write to it at once. attach() lets this worker resume it afterwards."""
+        self._turn += 1  # drop any in-flight output
+        self.detached = True
+        asyncio.run_coroutine_threadsafe(self._release(), self._loop).result(timeout=20)
+
+    def attach(self) -> None:
+        self.detached = False  # the next send() reconnects with resume=<session_id>
+
+    async def _release(self):
+        await self._interrupt()
+        if self._client is not None:
+            try:
+                await self._client.disconnect()
+            except Exception:
+                pass
+            self._client = None
+        self._resume_next = self.session_id is not None
 
     def has_pending(self) -> bool:
         return self._pending is not None and not self._pending.done()
@@ -154,6 +180,7 @@ class ClaudeWorker:
                 env={"RAVEN": ""},
                 system_prompt={"type": "preset", "preset": "claude_code", "append": prompt},
                 disallowed_tools=DISALLOWED_TOOLS,
+                resume=self.session_id if self._resume_next else None,
                 **extra,
             )
             self._client = ClaudeSDKClient(options=opts)
@@ -201,6 +228,8 @@ class ClaudeWorker:
                 pass
 
     async def _send(self, text: str, turn: int):
+        if self.detached:
+            return self._emit(turn, "error", "the Claude session is open in a terminal; hand it back first")
         try:
             await self._interrupt()
             if turn != self._turn:  # a newer message already superseded this one
@@ -216,6 +245,7 @@ class ClaudeWorker:
 
         try:
             async for msg in client.receive_response():
+                self.session_id = getattr(msg, "session_id", None) or self.session_id
                 if isinstance(msg, AssistantMessage):
                     for b in msg.content:
                         if isinstance(b, TextBlock) and b.text.strip():

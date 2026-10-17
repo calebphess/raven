@@ -139,6 +139,13 @@ class FakeWorker:
         self.sent = []
         self.pending = False
         self.answers = []
+        self.detached = False
+        self.session = {"session_id": "sess-1", "cwd": "/work/proj"}
+        self.calls = []
+
+    def session_info(self): return self.session
+    def detach(self): self.detached = True; self.calls.append("detach")
+    def attach(self): self.detached = False; self.calls.append("attach")
 
     def send(self, text): self.sent.append(text)
     def interrupt(self): pass
@@ -655,3 +662,96 @@ def test_short_continuations_get_a_canned_ack_not_a_guess(monkeypatch, tmp_path)
     llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Running the tests."])
     a.handle_text("run all the tests now"); a.wait()
     assert spoken == ["Running the tests."]             # real requests still get the first-step guess
+
+
+# ── open the Claude session in a terminal ──
+import subprocess
+from raven2 import terminal as T
+
+
+def test_terminal_command_resumes_the_session_in_its_project_dir():
+    cmd = T.claude_command("/Users/someone/My Projects/it's", "abc-123", "/bin/claude")
+    assert cmd == "cd '/Users/someone/My Projects/it'\"'\"'s' && env -u RAVEN /bin/claude --resume abc-123"
+
+
+def test_applescript_quotes_and_targets():
+    cmd = T.claude_command('/w/"x"', "id1", "/bin/claude")
+    t = T.script_for(cmd, "Terminal")
+    assert 'tell application "Terminal"' in t and "do script" in t and '\\"x\\"' in t
+    assert 'tell application "iTerm"' in T.script_for(cmd, "iTerm")
+
+
+def test_open_in_terminal_reports_osascript_failure(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 1, "", "not allowed"))
+    with pytest.raises(RuntimeError, match="not allowed"):
+        T.open_in_terminal("echo hi")
+
+
+def test_open_manual_session_pauses_raven_and_opens_the_terminal(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    opened = []
+    monkeypatch.setattr(T, "open_in_terminal", lambda cmd, app="Terminal": opened.append(cmd))
+    monkeypatch.setattr(T.shutil, "which", lambda n: "/bin/claude")
+    a.status = Status(stream=io.StringIO(), enabled=True)
+    a.handle_text("do a big task for me please"); a.wait()
+    info = a.open_manual_session()
+    assert info["session_id"] == "sess-1" and w.calls == ["detach"] and a.manual
+    assert opened == ["cd /work/proj && env -u RAVEN /bin/claude --resume sess-1"]
+    assert "terminal" in a.status.text()[1] and not a._working
+    n = len(w.sent)
+    a.handle_text("hello are you there"); a.wait()
+    assert len(w.sent) == n and "open in the terminal" in " ".join(spoken)   # nothing reaches the session
+    a.hand_back()
+    assert not a.manual and w.calls == ["detach", "attach"]
+    a.handle_text("ok continue with the task now"); a.wait()
+    assert w.sent[-1] == "ok continue with the task now"
+
+
+def test_open_manual_session_without_a_session_yet(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.session = None
+    with pytest.raises(RuntimeError, match="no Claude session yet"):
+        a.open_manual_session()
+    assert w.calls == [] and not a.manual
+
+
+def test_if_the_terminal_wont_open_raven_is_not_left_paused(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    def boom(cmd, app="Terminal"): raise RuntimeError("couldn't open Terminal: not allowed")
+    monkeypatch.setattr(T, "open_in_terminal", boom)
+    monkeypatch.setattr(T.shutil, "which", lambda n: "/bin/claude")
+    with pytest.raises(RuntimeError):
+        a.open_manual_session()
+    assert w.calls == ["detach", "attach"] and not a.manual
+
+
+def test_missing_claude_binary_fails_before_pausing(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(T.shutil, "which", lambda n: None)
+    with pytest.raises(FileNotFoundError):
+        a.open_manual_session()
+    assert w.calls == []
+
+
+@pytest.mark.parametrize("text,kind", [
+    ("open Claude in the terminal", "open_terminal"), ("take me to the claude session", "open_terminal"),
+    ("let me see the session", "open_terminal"), ("hand it back", "handback"),
+    ("I'm done in the terminal", "handback"), ("you can have claude back", "handback")])
+def test_voice_commands_for_manual_session(text, kind):
+    assert commands.match(text, P.load_all()).kind == kind
+
+
+@pytest.mark.parametrize("text", ["open the readme file", "why does the terminal crash on startup",
+                                  "please open the config and change the port to nine thousand"])
+def test_ordinary_requests_do_not_trigger_terminal_commands(text):
+    assert commands.match(text, P.load_all()) is None
+
+
+def test_voice_command_runs_the_takeover(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(T, "open_in_terminal", lambda cmd, app="Terminal": None)
+    monkeypatch.setattr(T.shutil, "which", lambda n: "/bin/claude")
+    a.handle_text("open claude in the terminal"); a.wait()
+    assert a.manual and "Opening Claude in the terminal." in spoken and w.sent == []
+    a.handle_text("hand it back"); a.wait()
+    assert not a.manual and "Back in control." in spoken

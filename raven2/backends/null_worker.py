@@ -10,6 +10,7 @@ class NullWorker:
         self.sent: list[str] = []
         self.on_event = None
         self.controls = None
+        self.detached = False
 
     def send(self, text: str) -> None:
         self.sent.append(text)
@@ -24,4 +25,13 @@ class NullWorker:
         return False
 
     def close(self) -> None:
+        pass
+
+    def session_info(self):
+        return None
+
+    def detach(self) -> None:
+        pass
+
+    def attach(self) -> None:
         pass

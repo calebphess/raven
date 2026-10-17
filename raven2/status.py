@@ -62,6 +62,11 @@ class Status:
             self.state, self.detail = "error", detail
         self._redraw()
 
+    def manual(self) -> None:
+        with self._lock:
+            self.state, self.detail = "manual", ""
+        self._redraw()
+
     def idle(self) -> None:
         with self._lock:
             self.state, self.detail = "idle", ""
@@ -86,6 +91,9 @@ class Status:
                 sp = _SPIN[int(time.monotonic() * 10) % len(_SPIN)]
                 label = f"{sp} Claude working {run:.0f}s{tools}"
                 return f"{_C['yellow']}{label}{_C['off']}", f"Raven: {label}"
+            if s == "manual":
+                label = "◆ Claude is open in a terminal — Raven is paused"
+                return f"{_C['cyan']}{label}{_C['off']}", f"Raven: {label}"
             if s == "waiting":
                 label = f"? Claude is waiting for your answer{': ' + d if d else ''}"
                 return f"{_C['magenta']}{label}{_C['off']}", f"Raven: {label}"

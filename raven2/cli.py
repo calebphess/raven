@@ -83,6 +83,7 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("arg", nargs="?")
     for name, h in (("run", "push-to-talk voice loop (hold Right Option)"), ("chat", "typed input, spoken replies (no mic needed)")):
         sub.add_parser(name, help=h).add_argument("--no-intro", action="store_true", help="skip the spoken startup greeting")
+    sub.add_parser("ui", help="menubar app + window (push-to-talk keeps working when the window is closed)")
     sp = sub.add_parser("say", help="speak a line in a persona's voice")
     sp.add_argument("text")
     sp.add_argument("--persona")
@@ -104,9 +105,10 @@ def main(argv: list[str] | None = None) -> int:
 
     from . import app
 
+    worker = a.worker or ("claude" if a.cmd == "ui" else None)  # the UI exists to front Claude Code
     try:
-        asst = app.build(a.profile, getattr(a, "persona", None), worker=a.worker,
-                         cwd=(a.cwd or os.getcwd()) if a.worker == "claude" else a.cwd)
+        asst = app.build(a.profile, getattr(a, "persona", None), worker=worker,
+                         cwd=(a.cwd or os.getcwd()) if worker == "claude" else a.cwd)
     except FileNotFoundError as e:
         print(f"[raven] {e}", file=sys.stderr)
         return 1
@@ -115,6 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     except packs.PackError as e:
         print(f"[raven] {e}", file=sys.stderr)
         return 1
+    if a.cmd == "ui":
+        from .ui import run_ui
+
+        return run_ui(asst)
     if a.cmd == "say":
         if a.raw:
             asst.persona.voice.effects = {}

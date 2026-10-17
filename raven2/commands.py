@@ -24,6 +24,9 @@ _SWITCH = [
     r"^(?:please\s+)?(?:use|become|be)\s+(.+?)(?:\s+(?:persona|voice))?$",
     r"^(?:put\s+on|let me talk to|get me|i want to talk to)\s+(.+)$",
 ]
+_OPEN = re.compile(r"\b(open|show|take me to|let me (see|use|drive))\b.*\b(claude|session|terminal)\b")
+_HANDBACK = re.compile(r"\b(hand (it )?back|take (it|over) back|resume (raven|the assistant)|i'?m done in the terminal|"
+                       r"you can have (it|claude) back)\b")
 _STOP = re.compile(r"^(stop|be quiet|shut up|cancel|never ?mind)[.!]?$")
 
 
@@ -31,6 +34,10 @@ def match(text: str, personas: dict[str, Persona]) -> Command | None:
     t = text.strip().lower().rstrip(".!?,")
     if _STOP.match(t):
         return Command("stop")
+    if _HANDBACK.search(t):
+        return Command("handback")
+    if _OPEN.search(t) and len(t.split()) <= 9:
+        return Command("open_terminal")
     if _LIST.search(t) and len(t.split()) <= 8:
         return Command("list")
     for pat in _SWITCH:

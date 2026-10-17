@@ -93,6 +93,19 @@ class Worker(Protocol):
         ...
     def has_pending(self) -> bool: ...
     def close(self) -> None: ...
+    detached: bool
+
+    def session_info(self) -> "dict | None":
+        """{session_id, cwd} once a session exists, else None."""
+        ...
+
+    def detach(self) -> None:
+        """Release the session to a human terminal (stops any running turn)."""
+        ...
+
+    def attach(self) -> None:
+        """Take the session back; the next send resumes it."""
+        ...
 
 
 @runtime_checkable
