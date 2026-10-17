@@ -134,8 +134,23 @@ def app_pixmap(size: int) -> QPixmap:
     return pm.scaled(size, size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
+def logo_pixmap(size: int) -> QPixmap:
+    """The small orbital logo (window header, menubar icon), rendered at 2x so it is sharp on Retina screens."""
+    pm = QPixmap(str(ASSET_DIR / "logo.png"))
+    if pm.isNull():
+        return app_pixmap(size)
+    pm = pm.scaled(size * 2, size * 2, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    pm.setDevicePixelRatio(2)
+    return pm
+
+
 def make_icon() -> QIcon:
+    """The raven app icon (Dock when run unbundled, window icon, dialogs)."""
     return QIcon(app_pixmap(256))
+
+
+def make_tray_icon() -> QIcon:
+    return QIcon(logo_pixmap(64))
 
 
 class Bridge(QObject):
@@ -292,7 +307,7 @@ class RavenWindow(QWidget):
         # header: logo, title, persona picker, menu
         logo = QLabel()
         logo.setObjectName("logo")
-        logo.setPixmap(app_pixmap(30))
+        logo.setPixmap(logo_pixmap(30))
         logo.setFixedSize(34, 34)
         logo.setAlignment(Qt.AlignCenter)
         title = _label("Raven", "title", wrap=False)
@@ -642,7 +657,7 @@ def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = N
     asst.project_dir = project_dir
     win = RavenWindow(asst, bridge, project_dir)
 
-    tray = QSystemTrayIcon(make_icon(), app)
+    tray = QSystemTrayIcon(make_tray_icon(), app)
     menu = QMenu()
     show = QAction("Show Raven")
     show.triggered.connect(lambda: (win.show(), win.raise_(), win.activateWindow()))
