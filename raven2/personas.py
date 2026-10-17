@@ -98,9 +98,12 @@ def find(query: str, personas: dict[str, Persona]) -> Persona | None:
     return None
 
 
+DEFAULT_ID = "dottie"
+
+
 # ── Active persona state ──────────────────────────────────────────────────────
 
-def get_active_id(default: str = "dottie") -> str:
+def get_active_id(default: str = DEFAULT_ID) -> str:
     try:
         return json.loads(config.STATE_FILE.read_text()).get("persona", default)
     except Exception:

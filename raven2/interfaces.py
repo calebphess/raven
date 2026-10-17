@@ -59,10 +59,25 @@ class WorkerEvent:
 
 
 @runtime_checkable
+class RavenControls(Protocol):
+    """What a worker may do to the live Raven session. Exposed to Claude as tools, so requests like
+    "switch to the butler" act on Raven instead of being misread as a task about the project."""
+
+    def list_personas(self) -> list[dict]:
+        """[{id, name, aliases, active, default}] — names only, never personality text."""
+        ...
+
+    def set_persona(self, query: str) -> str:
+        """Switch the live persona; returns a short confirmation. Raises ValueError if unknown."""
+        ...
+
+
+@runtime_checkable
 class Worker(Protocol):
     """Background agent (Claude Code, local or remote)."""
 
     on_event: "Callable[[WorkerEvent], None] | None"
+    controls: "RavenControls | None"  # set by the assistant; None means the worker gets no Raven tools
 
     def send(self, text: str) -> None:
         """Start a new turn, interrupting any running one."""

@@ -36,8 +36,10 @@ class Assistant:
         self._speech_lock = threading.Lock()  # one voice at a time; worker readouts queue behind each other
         self._speak_error = ""
         self._tools = 0
+        self._persona_changed = False
         self._ask_kind = ""
         svc.worker.on_event = self._on_worker_event
+        svc.worker.controls = self  # lets the worker list/switch personas on this live session
 
     @property
     def persona(self) -> P.Persona:
@@ -65,7 +67,7 @@ class Assistant:
             return self._answer_pending(text)
         w.send(text)  # always forwarded (interrupting any running turn); the worker decides what to do
         if getattr(w, "background", True):
-            self._tools = 0
+            self._tools, self._persona_changed = 0, False
             self._start(lambda: self._ack(text))
         else:
             self._start(lambda: self.svc.brain.reply(text))
@@ -95,7 +97,8 @@ class Assistant:
 
     def _on_worker_event(self, ev: WorkerEvent) -> None:
         if ev.kind == "tool":
-            self._tools += 1
+            if not ev.text.startswith(("mcp__raven__", "ToolSearch")):  # session plumbing, not user work
+                self._tools += 1
         elif ev.kind == "ask":
             self._ask_kind = ev.data.get("ask_type", "permission")
             if self._ask_kind == "question":
@@ -103,6 +106,10 @@ class Assistant:
             else:
                 self.say(f"{ev.text.rstrip('.?')}. Yes, always, or no?")
         elif ev.kind == "done":
+            if self._persona_changed and self._tools == 0:  # a switch speaks for itself; no readout
+                self._persona_changed = False
+                return
+            self._persona_changed = False
             tools, result = self._tools, ev.text or "Finished, with no summary."
             self._start(lambda: self.svc.brain.relay(result, tools), cancel_current=False)
         elif ev.kind == "error":
@@ -152,6 +159,26 @@ class Assistant:
                 fn()
             except Exception as e:
                 raise StartupError(f"{label} failed to load: {type(e).__name__}: {e}") from e
+
+    # ── RavenControls (called by the worker from its own thread) ──
+    def list_personas(self) -> list[dict]:
+        self.personas = P.load_all()  # include packs installed since startup
+        return [{"id": p.id, "name": p.name, "aliases": p.aliases, "active": p.id == self.persona.id,
+                 "default": p.id == P.DEFAULT_ID} for p in self.personas.values()]
+
+    def set_persona(self, query: str) -> str:
+        self.personas = P.load_all()
+        persona = P.find(query, self.personas)
+        if persona is None:
+            raise ValueError(f"No persona matches {query!r}. Available: "
+                             + ", ".join(p.name for p in self.personas.values()))
+        try:
+            self.switch(persona)  # loads the voice (downloading its pack if needed), then swaps brain + voice
+        except (AssetMissing, packs.PackError) as e:
+            raise ValueError(f"Couldn't load {persona.name}: {e}") from e
+        self._persona_changed = True
+        self._start(self.svc.brain.intro)  # the new persona announces itself in its own voice
+        return f"Switched to {persona.name}."
 
     def switch(self, persona: P.Persona) -> None:
         self.prepare(persona)

@@ -328,3 +328,65 @@ def test_ack_accepts_first_step_phrases(monkeypatch, tmp_path):
         llm.stream = lambda messages, max_tokens=160, temperature=None, _g=good: iter([_g])
         a.handle_text("explain this project"); a.wait()
         assert spoken == [good]
+
+
+# ── RavenControls: Claude switching the live persona ──
+def test_controls_list_and_switch_live_persona(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    assert w.controls is a  # the worker is handed the assistant's controls
+    rows = a.list_personas()
+    assert {"dottie", "charles", "raven"} <= {r["id"] for r in rows}
+    assert [r["id"] for r in rows if r["active"]] == ["dottie"]
+    assert all(set(r) == {"id", "name", "aliases", "active", "default"} for r in rows)
+    assert [r["id"] for r in rows if r["default"]] == ["dottie"]  # names only, no personality text
+    assert a.set_persona("the butler") == "Switched to Charles."
+    assert a.persona.id == "charles" and a.svc.brain.persona.id == "charles"
+    assert [r["id"] for r in a.list_personas() if r["active"]] == ["charles"]
+
+
+def test_controls_unknown_persona_is_a_clear_error(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    with pytest.raises(ValueError, match="Available: .*Dottie"):
+        a.set_persona("gandalf")
+    assert a.persona.id == "dottie"
+
+
+def test_session_prompt_names_personas_but_carries_no_personality(monkeypatch, tmp_path):
+    from raven2.backends.claude_worker import PERSONA_PROMPT
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    names = ", ".join(r["name"] for r in a.list_personas())
+    text = PERSONA_PROMPT.format(names=names, default="Dottie")
+    assert "Charles" in text and "mcp__raven__set_persona" in text and "NOT anything in the project" in text
+    for p in a.personas.values():
+        assert p.personality[:40] not in text and p.description not in text
+
+
+def test_persona_switch_via_claude_announces_itself_without_a_readout(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.on_event(WorkerEvent("tool", "mcp__raven__set_persona"))
+    a.set_persona("charles")  # called by the worker's tool handler
+    w.on_event(WorkerEvent("done", "Switched to Charles."))
+    a.wait()
+    assert a.persona.id == "charles"
+    assert spoken == ["Hello there, friend.", "All good."]  # the intro only; no relay of "Switched to Charles."
+    assert "started up" in llm.messages[-1]["content"]
+
+
+def test_tool_search_plumbing_does_not_count_as_work(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.on_event(WorkerEvent("tool", "ToolSearch"))
+    w.on_event(WorkerEvent("tool", "mcp__raven__set_persona"))
+    a.set_persona("charles")
+    w.on_event(WorkerEvent("done", "Switched to Charles."))
+    a.wait()
+    assert spoken == ["Hello there, friend.", "All good."]
+
+
+def test_persona_switch_plus_real_work_still_gets_a_readout(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.on_event(WorkerEvent("tool", "mcp__raven__set_persona"))
+    a.set_persona("charles")
+    w.on_event(WorkerEvent("tool", "Bash: pytest"))
+    w.on_event(WorkerEvent("done", "Switched, then all tests passed."))
+    a.wait()
+    assert len(spoken) == 4  # the persona's intro (2 chunks) plus a readout of the real work (2 chunks)

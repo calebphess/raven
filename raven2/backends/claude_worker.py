@@ -20,6 +20,18 @@ SESSION_PROMPT = (
     "special tags or markup meant for speech."
 )
 
+PERSONA_PROMPT = (
+    "Raven has switchable personas (character voices): {names}. If the user asks to switch, change, list "
+    "or ask about personas, voices or characters (for example 'switch to the butler', 'use Raven', "
+    "'what personas are there', 'change your voice'), they mean Raven's personas, NOT anything in the "
+    "project. Use the mcp__raven__list_personas and mcp__raven__set_persona tools for those requests and "
+    "do not search the project's files. Never adopt a persona's personality yourself; Raven speaks in "
+    "character and you stay neutral. The default persona is {default}. Note that 'Raven' is also the name of "
+    "this voice assistant app and also the name of one persona: only treat it as the persona when the user "
+    "clearly means the persona, and 'the default' or 'the normal one' means {default}. After switching, "
+    "reply with one short line."
+)
+
 
 def _tool_label(name: str, inp: dict) -> str:
     for k in ("file_path", "path", "command", "pattern", "url", "description"):
@@ -42,6 +54,9 @@ def _speakable(name: str, inp: dict, title: str | None = None) -> str:
     return "Claude wants to " + verbs.get(name, f"use the {name} tool")
 
 
+RAVEN_TOOLS = ("mcp__raven__list_personas", "mcp__raven__set_persona")
+
+
 class ClaudeWorker:
     def __init__(self, cwd: str = ".", model: str | None = None, permission_mode: str | None = None, **_):
         import os
@@ -51,6 +66,7 @@ class ClaudeWorker:
             raise FileNotFoundError(f"working directory does not exist: {self._cwd}")
         self._model, self._mode = model, permission_mode
         self.on_event = None
+        self.controls = None
         self._loop = asyncio.new_event_loop()
         threading.Thread(target=self._loop.run_forever, daemon=True, name="claude-worker").start()
         self._client = None
@@ -97,17 +113,52 @@ class ClaudeWorker:
         if self._client is None:
             from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
 
+            prompt, extra = SESSION_PROMPT, {}
+            if self.controls is not None:
+                rows = self.controls.list_personas()
+                default = next((p["name"] for p in rows if p.get("default")), rows[0]["name"])
+                prompt += " " + PERSONA_PROMPT.format(names=", ".join(p["name"] for p in rows), default=default)
+                # Not in allowed_tools: that would shadow can_use_tool (SDK warns); _decide allows them instead.
+                extra = {"mcp_servers": {"raven": self._raven_server()}}
             opts = ClaudeAgentOptions(
                 cwd=self._cwd,
                 model=self._model,
                 permission_mode=self._mode,
                 can_use_tool=self._can_use_tool,
                 env={"RAVEN": ""},
-                system_prompt={"type": "preset", "preset": "claude_code", "append": SESSION_PROMPT},
+                system_prompt={"type": "preset", "preset": "claude_code", "append": prompt},
+                **extra,
             )
             self._client = ClaudeSDKClient(options=opts)
             await self._client.connect()
         return self._client
+
+    def _raven_server(self):
+        """In-process MCP server: the only way Claude touches the live Raven session."""
+        from claude_agent_sdk import create_sdk_mcp_server, tool
+
+        loop = asyncio.get_running_loop()
+
+        def reply(text: str, error: bool = False) -> dict:
+            out = {"content": [{"type": "text", "text": text}]}
+            return {**out, "is_error": True} if error else out
+
+        @tool("list_personas", "List Raven's personas (character voices) and which one is active.", {})
+        async def list_personas(args):
+            rows = await loop.run_in_executor(None, self.controls.list_personas)
+            return reply("\n".join(
+                f"{'* ' if r['active'] else '  '}{r['name']} (id: {r['id']})"
+                + (" [default]" if r.get("default") else "") for r in rows))
+
+        @tool("set_persona", "Switch Raven's live persona (voice and personality) by name, e.g. 'Charles'.",
+              {"name": str})
+        async def set_persona(args):
+            try:
+                return reply(await loop.run_in_executor(None, self.controls.set_persona, args["name"]))
+            except ValueError as e:
+                return reply(str(e), error=True)
+
+        return create_sdk_mcp_server("raven", tools=[list_personas, set_persona])
 
     async def _interrupt(self):
         if self._pending and not self._pending.done():
@@ -160,6 +211,9 @@ class ClaudeWorker:
 
     async def _decide(self, name, tool_input, ctx):
         from claude_agent_sdk import PermissionResultAllow, PermissionResultDeny
+
+        if name in RAVEN_TOOLS:  # the user's own session controls, already scoped to personas
+            return PermissionResultAllow()
 
         if name in self._always:
             return PermissionResultAllow()

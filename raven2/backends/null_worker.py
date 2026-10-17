@@ -9,6 +9,7 @@ class NullWorker:
     def __init__(self, **_):
         self.sent: list[str] = []
         self.on_event = None
+        self.controls = None
 
     def send(self, text: str) -> None:
         self.sent.append(text)
