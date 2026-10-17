@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+
 import os
 from typing import Iterator
 
@@ -14,13 +16,15 @@ class LlamaCppLLM:
                         n_gpu_layers=n_gpu_layers, verbose=False)
         self._temp = temperature
         self._llm = None
+        self._load_lock = threading.Lock()
 
     def _load(self):
-        if self._llm is None:
-            from llama_cpp import Llama
+        with self._load_lock:
+            if self._llm is None:
+                from llama_cpp import Llama
 
-            self._llm = Llama(model_path=str(self._path), **self._kw)
-        return self._llm
+                self._llm = Llama(model_path=str(self._path), **self._kw)
+            return self._llm
 
     def stream(self, messages: list[dict], max_tokens: int = 160, temperature: float | None = None) -> Iterator[str]:
         gen = self._load().create_chat_completion(messages=messages, max_tokens=max_tokens,

@@ -82,13 +82,7 @@ class Brain:
         r"done|finished|complete[d]?|fixed|passed|failed|unchanged|updated|repository|unclear|awaited|"
         r"please|status|defined)\b", re.I)
 
-    def acknowledge(self, text: str) -> Iterator[str]:
-        """Instant, in-voice acknowledgement while the worker starts.
-
-        The model is deliberately NOT shown the request. Shown it, a 1B model tends to answer
-        ("Nine files are in the src folder") — spoken misinformation before the worker has done anything.
-        Without it, it can only emit a short in-character 'on it'. The reply is still validated, and
-        yielding nothing makes the caller fall back to a canned persona line."""
+    def _ack_messages(self) -> list[dict]:
         system = (self.persona.personality.replace("{user}", self.user_name or "the user")
                   + " The user has just handed you a task and you are starting on it. Say one very short "
                   "acknowledgement, at most 6 words, no quotation marks. You do not know what the task is.")
@@ -97,8 +91,40 @@ class Brain:
         for r in replies[:3]:  # the persona's own lines teach voice
             messages += [{"role": "user", "content": "Acknowledge."}, {"role": "assistant", "content": r}]
         messages.append({"role": "user", "content": "Acknowledge."})
+        return messages
+
+    def acknowledge(self, text: str) -> Iterator[str]:
+        """Instant, in-voice acknowledgement while the worker starts.
+
+        The model is deliberately NOT shown the request. Shown it, a 1B model tends to answer
+        ("Nine files are in the src folder") — spoken misinformation before the worker has done anything.
+        Without it, it can only emit a short in-character 'on it'. The reply is still validated, and
+        yielding nothing makes the caller fall back to a canned persona line."""
+        messages = self._ack_messages()
         out = "".join(self.llm.stream(messages, max_tokens=14, temperature=1.0)).replace('"', "").strip()
         if not out or len(out.split()) > 8 or self._CLAIM.search(out):
             return
         self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": out}]
         yield out
+
+    def warm(self) -> None:
+        """Load the model and prefill the persona prompt so the first real reply isn't a cold start."""
+        messages = [{"role": "system", "content": system_prompt(self.persona, self.user_name)},
+                    {"role": "user", "content": "Hi."}]
+        for msgs in (messages, self._ack_messages()):  # chat prompt and ack prompt, both on the hot path
+            for _ in self.llm.stream(msgs, max_tokens=1):
+                pass
+
+    def intro(self) -> Iterator[str]:
+        """Fresh, in-voice startup line. Speaking it is also the signal that the model is up."""
+        messages = [{"role": "system", "content": system_prompt(self.persona, self.user_name)}]
+        if self.persona.greeting:  # one example line sets the voice; high temperature keeps it varied
+            messages += [{"role": "user", "content": "You have just started up. Greet the user in one short sentence."},
+                         {"role": "assistant", "content": self.persona.greeting}]
+        messages.append({"role": "user", "content": "You have just started up. Greet the user in one short sentence, "
+                         "saying who you are and that you are ready. Use different words than before."})
+        for c in clauses(self.llm.stream(messages, max_tokens=30, temperature=1.0), first_min=10):
+            c = c.replace('"', "")
+            yield c
+            if c.rstrip().endswith((".", "!", "?")):  # one sentence is the brief; stop there
+                break

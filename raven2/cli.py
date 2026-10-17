@@ -5,6 +5,7 @@ import os
 import sys
 
 from . import config, packs, personas as P
+from .core import StartupError
 
 
 def _list_personas() -> int:
@@ -52,6 +53,15 @@ def _personas(a) -> int:
     return 1
 
 
+def _startup(asst, a) -> int:
+    try:
+        asst.startup(intro=not a.no_intro)
+    except StartupError as e:
+        print(f"[raven] startup failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="raven2")
     ap.add_argument("--profile")
@@ -62,8 +72,8 @@ def main(argv: list[str] | None = None) -> int:
     pp = sub.add_parser("personas", help="list / use / install / remove personas")
     pp.add_argument("action", choices=["list", "use", "install", "remove", "fetch"], nargs="?", default="list")
     pp.add_argument("arg", nargs="?")
-    sub.add_parser("run", help="push-to-talk voice loop (hold Right Option)")
-    sub.add_parser("chat", help="typed input, spoken replies (no mic needed)")
+    for name, h in (("run", "push-to-talk voice loop (hold Right Option)"), ("chat", "typed input, spoken replies (no mic needed)")):
+        sub.add_parser(name, help=h).add_argument("--no-intro", action="store_true", help="skip the spoken startup greeting")
     sp = sub.add_parser("say", help="speak a line in a persona's voice")
     sp.add_argument("text")
     sp.add_argument("--persona")
@@ -103,6 +113,8 @@ def main(argv: list[str] | None = None) -> int:
         asst.say(a.text)
         asst.wait()
     elif a.cmd == "chat":
+        if _startup(asst, a):
+            return 1
         print(f"{asst.persona.name} ready. Type to talk; 'quit' exits. Try: list personas / switch to charles")
         while True:
             try:
@@ -116,6 +128,9 @@ def main(argv: list[str] | None = None) -> int:
                 asst.wait()
     elif a.cmd == "run":
         from . import ptt
+
+        if _startup(asst, a):
+            return 1
 
         try:
             ptt.run(asst)

@@ -265,3 +265,51 @@ def test_canned_ack_mode_skips_the_model(monkeypatch, tmp_path):
     a.ack_mode = "canned"
     a.handle_text("run the tests"); a.wait()
     assert spoken[0] in a.persona.acks and not hasattr(llm, "messages")
+
+
+def test_startup_loads_models_then_model_speaks_intro(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    order = []
+    a.svc.stt.transcribe = lambda s, sr=16000: order.append("stt") or ""
+    orig = llm.stream
+    llm.stream = lambda m, max_tokens=160, temperature=None: (order.append("llm"), orig(m, max_tokens, temperature))[1]
+    a.startup()
+    a.wait()
+    assert order[0] == "stt" and "llm" in order  # models loaded before anything is spoken
+    assert spoken == ["Hello there, friend."] and spoken[0] != a.persona.greeting  # generated, not canned
+    assert "started up" in llm.messages[-1]["content"]
+
+
+def test_startup_fails_loudly_when_llm_cannot_load(monkeypatch, tmp_path):
+    from raven2.core import StartupError
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    def boom(messages, max_tokens=160, temperature=None):
+        raise RuntimeError("no model")
+        yield
+    llm.stream = boom
+    with pytest.raises(StartupError, match="language model failed to load"):
+        a.startup()
+    assert spoken == []  # no canned greeting papering over a dead model
+
+
+def test_startup_fails_loudly_when_stt_cannot_load(monkeypatch, tmp_path):
+    from raven2.core import StartupError
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    def boom(s, sr=16000):
+        raise OSError("model file missing")
+    a.svc.stt.transcribe = boom
+    with pytest.raises(StartupError, match="speech-to-text failed to load"):
+        a.startup()
+
+
+def test_intro_is_one_sentence(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["I'm Dottie, online.", " Systems nominal.", " More."])
+    a.startup(); a.wait()
+    assert spoken == ["I'm Dottie, online."]
+
+
+def test_startup_without_intro_is_silent(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a.startup(intro=False); a.wait()
+    assert spoken == []

@@ -22,6 +22,10 @@ class Services:
     brain: Brain
 
 
+class StartupError(RuntimeError):
+    pass
+
+
 class Assistant:
     def __init__(self, svc: Services, personas: dict[str, P.Persona], log: Callable[[str], None] = print,
                  ack_mode: str = "generated"):
@@ -30,6 +34,7 @@ class Assistant:
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._speech_lock = threading.Lock()  # one voice at a time; worker readouts queue behind each other
+        self._speak_error = ""
         self._tools = 0
         self._ask_kind = ""
         svc.worker.on_event = self._on_worker_event
@@ -126,6 +131,28 @@ class Assistant:
             packs.install_pack(persona.id, persona.name)  # download + install, then load
             prep(persona.voice)
 
+    def startup(self, intro: bool = True) -> None:
+        """Load the STT and LLM models up front (blocking), then have the model introduce itself.
+        The spoken intro doubles as the 'I'm up' signal. There is deliberately no fallback: if a model
+        fails to load this raises StartupError, and the caller shows it and exits."""
+        self.log("loading models...")
+        self._warm()
+        if intro:
+            self._start(self.svc.brain.intro)
+            self.wait()
+            if self._speak_error:
+                raise StartupError(self._speak_error)
+
+    def _warm(self) -> None:
+        import numpy as np
+
+        for label, fn in (("speech-to-text", lambda: self.svc.stt.transcribe(np.zeros(16_000, np.float32))),
+                          ("language model", self.svc.brain.warm)):
+            try:
+                fn()
+            except Exception as e:
+                raise StartupError(f"{label} failed to load: {type(e).__name__}: {e}") from e
+
     def switch(self, persona: P.Persona) -> None:
         self.prepare(persona)
         self.svc.brain.set_persona(persona)
@@ -162,7 +189,8 @@ class Assistant:
                         break
                     self.svc.out.play(audio)
         except Exception as e:
-            self.log(f"[error] {type(e).__name__}: {e}")
+            self._speak_error = f"{type(e).__name__}: {e}"
+            self.log(f"[error] {self._speak_error}")
         finally:
             close = getattr(gen, "close", None)
             if close:
