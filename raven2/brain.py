@@ -21,6 +21,20 @@ def system_prompt(persona: Persona, user_name: str = "") -> str:
     return f"{BASE_RULES} {who}\n\n" + persona.personality.replace("{user}", user_name or "the user")
 
 
+def limit_sentences(pieces: Iterator[str], n: int) -> Iterator[str]:
+    """Stop the token stream right after the n-th sentence end (truncating mid-piece), so the limit holds
+    no matter how the speech chunker groups text. Closing the generator cancels the model."""
+    seen = 0
+    for piece in pieces:
+        for i, ch in enumerate(piece):
+            if ch in ".!?":
+                seen += 1
+                if seen == n:
+                    yield piece[: i + 1]
+                    return
+        yield piece
+
+
 def clauses(pieces: Iterator[str], first_min: int = 12, min_len: int = 30) -> Iterator[str]:
     """Group streamed tokens into speakable chunks. The first chunk is cut early (latency),
     later ones wait for a sentence-ish boundary so prosody stays natural."""
@@ -119,12 +133,11 @@ class Brain:
         """Fresh, in-voice startup line. Speaking it is also the signal that the model is up."""
         messages = [{"role": "system", "content": system_prompt(self.persona, self.user_name)}]
         if self.persona.greeting:  # one example line sets the voice; high temperature keeps it varied
-            messages += [{"role": "user", "content": "You have just started up. Greet the user in one short sentence."},
+            messages += [{"role": "user", "content": "You have just started up. Say you are up and ready."},
                          {"role": "assistant", "content": self.persona.greeting}]
-        messages.append({"role": "user", "content": "You have just started up. Greet the user in one short sentence, "
-                         "saying who you are and that you are ready. Use different words than before."})
-        for c in clauses(self.llm.stream(messages, max_tokens=30, temperature=1.0), first_min=10):
-            c = c.replace('"', "")
-            yield c
-            if c.rstrip().endswith((".", "!", "?")):  # one sentence is the brief; stop there
-                break
+        messages.append({"role": "user", "content": "You have just started up. In two very short sentences, say you are up and running, then either "
+                         "say you are ready to begin or ask how you can help. Do not say your name. "
+                         "Use different words than before."})
+        stream = limit_sentences(self.llm.stream(messages, max_tokens=40, temperature=1.0), 2)
+        for c in clauses(stream, first_min=10):
+            yield c.replace('"', "")

@@ -276,7 +276,7 @@ def test_startup_loads_models_then_model_speaks_intro(monkeypatch, tmp_path):
     a.startup()
     a.wait()
     assert order[0] == "stt" and "llm" in order  # models loaded before anything is spoken
-    assert spoken == ["Hello there, friend."] and spoken[0] != a.persona.greeting  # generated, not canned
+    assert spoken == ["Hello there, friend.", "All good."] and spoken[0] != a.persona.greeting  # generated, not canned
     assert "started up" in llm.messages[-1]["content"]
 
 
@@ -302,14 +302,19 @@ def test_startup_fails_loudly_when_stt_cannot_load(monkeypatch, tmp_path):
         a.startup()
 
 
-def test_intro_is_one_sentence(monkeypatch, tmp_path):
+def test_intro_stops_after_two_sentences(monkeypatch, tmp_path):
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
-    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["I'm Dottie, online.", " Systems nominal.", " More."])
+    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Up and running.", " How can I help?", " More."])
     a.startup(); a.wait()
-    assert spoken == ["I'm Dottie, online."]
+    assert " ".join(spoken) == "Up and running. How can I help?"  # the 3rd sentence never reaches the speaker
 
 
 def test_startup_without_intro_is_silent(monkeypatch, tmp_path):
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
     a.startup(intro=False); a.wait()
     assert spoken == []
+
+
+def test_limit_sentences_truncates_mid_piece():
+    from raven2.brain import limit_sentences
+    assert "".join(limit_sentences(iter(["Up.", " Ready? Yes", ". More."]), 2)) == "Up. Ready?"
