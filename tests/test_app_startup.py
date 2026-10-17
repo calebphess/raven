@@ -220,3 +220,47 @@ def test_launch_never_asks_for_a_folder(monkeypatch, qapp):
     monkeypatch.setattr("raven2.ui.run_ui", lambda asst, **k: 0)
     assert gui_main.main() == 0
     assert not hasattr(gui_main, "ensure_project_dir") and not hasattr(gui_main, "change_folder")
+
+
+# ── the build script must never replace an app that is running ──
+def _load_build():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("build_app", os.path.join(os.path.dirname(__file__), "..", "scripts", "build_app.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_build_refuses_to_run_while_raven_is_open(monkeypatch, capsys):
+    b = _load_build()
+    monkeypatch.setattr(b, "running_copies", lambda app=b.APP: ["30773 " + str(b.APP) + "/Contents/MacOS/Raven"])
+    monkeypatch.setattr(b, "run", lambda *a: (_ for _ in ()).throw(AssertionError("must not build")))
+    monkeypatch.setattr(b.shutil, "rmtree", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not delete anything")))
+    assert b.main([]) == 2
+    assert "Quit Raven" in capsys.readouterr().err
+
+
+def test_running_copies_only_matches_this_app_bundle(monkeypatch, tmp_path):
+    import subprocess
+    b = _load_build()
+    mine, other = str(b.APP), "/Applications/Raven.app"
+    out = (f"101 {mine}/Contents/MacOS/Raven\n102 {mine}/Contents/MacOS/Raven\n"
+           f"103 {other}/Contents/MacOS/Raven\n104 /usr/bin/python3\n")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, out, ""))
+    assert [x.split()[0] for x in b.running_copies()] == ["101", "102"]     # an installed copy elsewhere is not ours
+
+
+def test_build_stages_then_swaps_so_a_failed_build_keeps_the_old_app(monkeypatch):
+    import subprocess
+    b = _load_build()
+    steps = []
+    monkeypatch.setattr(b, "running_copies", lambda app=b.APP: [])
+    monkeypatch.setattr(b.shutil, "rmtree", lambda p, **k: steps.append(("rmtree", str(p))))
+    def failing_run(*cmd):
+        steps.append(("run", str(cmd[2]) if len(cmd) > 2 else ""))
+        raise subprocess.CalledProcessError(1, cmd)
+    monkeypatch.setattr(b, "run", failing_run)
+    with pytest.raises(subprocess.CalledProcessError):
+        b.main([])
+    assert ("rmtree", str(b.APP)) not in steps                    # PyInstaller failed: the existing app was never touched
+    assert ("rmtree", str(b.STAGE)) in steps                      # only the scratch folder was cleared

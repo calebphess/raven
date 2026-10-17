@@ -12,6 +12,16 @@ def resample(x: np.ndarray, ratio: float) -> np.ndarray:
     return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.float32)
 
 
+def soft_limit(y: np.ndarray, knee: float = 0.8) -> np.ndarray:
+    """Transparent below `knee`; above it, peaks are rounded off smoothly toward +-1 instead of clipping.
+    (A plain tanh bends every sample, which colors the whole voice and distorts it even at normal levels.)"""
+    a = np.abs(y)
+    over = a > knee
+    out = y.astype(np.float32).copy()
+    out[over] = np.sign(y[over]) * (knee + (1 - knee) * np.tanh((a[over] - knee) / (1 - knee)))
+    return out
+
+
 class FxChain:
     """Keys: ring_hz + ring_mix (robotic), comb_ms + comb_mix (metallic echo), crush_bits, gain.
     Output is soft-limited, never re-normalized per chunk, so loudness stays consistent."""
@@ -40,4 +50,4 @@ class FxChain:
             levels = 2 ** int(fx["crush_bits"])
             y = np.round(y * levels) / levels
         self.pos += len(x)
-        return np.tanh(y * float(fx.get("gain", 1.0))).astype(np.float32)  # soft limit
+        return soft_limit(y * float(fx.get("gain", 1.0)))

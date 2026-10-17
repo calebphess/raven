@@ -1110,3 +1110,145 @@ def test_worker_open_project_starts_a_fresh_session_in_the_new_folder(tmp_path):
     with pytest.raises(FileNotFoundError):
         cw.open_project(str(tmp_path / "missing"))
     cw.close()
+
+
+# ── speech speed, loudness ──
+def _capture_piper(monkeypatch, speed=None, raw_peak=0.0, **voice_params):
+    """Run PiperTTS against a fake voice; returns (the SynthesisConfig of the real utterance, the tts)."""
+    from raven2.backends.piper_tts import PiperTTS
+    from raven2.interfaces import VoiceSpec
+    seen = {"calls": 0}
+    amp = int(raw_peak * 32768)
+    class FakeVoice:
+        config = type("C", (), {"sample_rate": 22050})()
+        def synthesize(self, text, cfg):
+            seen["calls"] += 1
+            seen["cfg"] = cfg                               # the last call is the real utterance
+            yield type("Chunk", (), {"audio_int16_array": np.full(2205, amp, np.int16)})()
+    tts = PiperTTS() if speed is None else PiperTTS(speed=speed)
+    monkeypatch.setattr(tts, "_voice", lambda vid: FakeVoice())
+    effects = voice_params.pop("effects", {})
+    list(tts.synthesize("hello", VoiceSpec("piper", "any-voice", voice_params, effects)))
+    tts.seen = seen
+    return seen["cfg"], tts
+
+
+def test_length_divisor_delivers_the_requested_real_speedup():
+    from raven2.backends.piper_tts import FIXED_SHARE, length_divisor
+    assert length_divisor(1.0) == pytest.approx(1.0)
+    for speed in (0.5, 0.8, 1.0, 1.3, 1.5, 2.0):
+        d = length_divisor(speed)
+        actual = 1 / (FIXED_SHARE + (1 - FIXED_SHARE) / d)       # what the audio really does (measured model)
+        assert actual == pytest.approx(speed), speed
+    assert length_divisor(1.3) > 1.3                              # length_scale alone under-delivers, so it's compensated
+    assert length_divisor(50) == length_divisor(2.0) and length_divisor(0.01) == length_divisor(0.5)   # bounded
+
+
+def test_default_speed_is_30_percent_faster(monkeypatch):
+    from raven2.backends.piper_tts import length_divisor
+    cfg, tts = _capture_piper(monkeypatch, length_scale=1.0)
+    assert tts.speed == 1.3 and cfg.length_scale == pytest.approx(1 / length_divisor(1.3)) and cfg.length_scale < 0.75
+
+
+def test_personas_keep_their_relative_pacing(monkeypatch):
+    dottie = _capture_piper(monkeypatch, length_scale=0.975)[0].length_scale
+    raven = _capture_piper(monkeypatch, length_scale=1.2)[0].length_scale
+    assert raven / dottie == pytest.approx(1.2 / 0.975)          # Raven is still slower and sultrier than Dottie
+
+
+def test_speed_is_configurable_and_bounded(monkeypatch):
+    assert _capture_piper(monkeypatch, speed=1.0, length_scale=1.0)[0].length_scale == pytest.approx(1.0)
+    assert _capture_piper(monkeypatch, speed=50, length_scale=1.0)[1].speed == 2.0
+    assert _capture_piper(monkeypatch, speed=0.01, length_scale=1.0)[1].speed == 0.5
+
+
+def test_pitch_shift_still_does_not_change_speed(monkeypatch):
+    base = _capture_piper(monkeypatch, length_scale=1.0)[0].length_scale
+    down = _capture_piper(monkeypatch, length_scale=1.0, effects={"pitch": -3})[0].length_scale
+    assert down == pytest.approx(base * 2 ** (-3 / 12))
+
+
+def test_default_profile_sets_the_speed_and_config_can_override_it(tmp_path):
+    from raven2 import config
+    assert config.load_profile("intel-cpu", path=tmp_path / "none.toml")["tts"]["speed"] == 1.3
+    (tmp_path / "c.toml").write_text('[tts]\nspeed = 1.0\n')
+    prof = config.load_profile("intel-cpu", path=tmp_path / "c.toml")
+    assert prof["tts"]["speed"] == 1.0 and prof["tts"]["backend"] == "piper"
+
+
+def test_each_voice_is_gain_matched_to_its_own_level(monkeypatch):
+    """Regression: one fixed boost clipped louder voices (Charles raw peak 0.72 x3 = 2.15)."""
+    from raven2.backends.piper_tts import TARGET_PEAK
+    quiet, q = _capture_piper(monkeypatch, raw_peak=0.26)
+    loud, l = _capture_piper(monkeypatch, raw_peak=0.72)
+    assert quiet.volume == pytest.approx(TARGET_PEAK / 0.26, rel=0.01) and loud.volume == pytest.approx(TARGET_PEAK / 0.72, rel=0.01)
+    assert loud.volume < quiet.volume                             # the louder voice gets less gain
+    assert 0.72 * loud.volume <= TARGET_PEAK + 0.01               # and ends up at the target, not past full scale
+
+
+def test_gain_is_bounded_measured_once_and_overridable(monkeypatch):
+    cfg, tts = _capture_piper(monkeypatch, raw_peak=0.01)
+    assert cfg.volume == 6.0                                      # a very quiet voice is capped
+    cfg, tts = _capture_piper(monkeypatch, raw_peak=0.0)
+    assert cfg.volume == 3.0                                      # silence in the calibration: a sane default
+    cfg, tts = _capture_piper(monkeypatch, raw_peak=0.26)
+    calls_before = tts.seen["calls"]
+    from raven2.interfaces import VoiceSpec
+    list(tts.synthesize("again", VoiceSpec("piper", "any-voice", {}, {})))
+    assert tts.seen["calls"] == calls_before + 1                  # the second utterance did not re-calibrate
+    assert _capture_piper(monkeypatch, raw_peak=0.26, volume=1.5)[0].volume == 1.5     # an explicit persona volume wins
+
+
+def test_soft_limit_is_transparent_below_the_knee_and_never_clips():
+    from raven2.audio_fx import soft_limit
+    quiet = np.linspace(-0.79, 0.79, 101).astype(np.float32)
+    assert np.array_equal(soft_limit(quiet), quiet)               # untouched below the knee (tanh bent everything)
+    loud = np.array([0.8, 0.9, 1.0, 1.5, 5.0, -0.9, -5.0], np.float32)
+    out = soft_limit(loud)
+    assert np.all(np.abs(out) <= 1.0) and np.all(np.sign(out) == np.sign(loud))   # approaches full scale, never past it
+    assert out[0] == pytest.approx(0.8) and out[1] < 0.9                          # continuous at the knee, rounds peaks off
+    assert np.all(np.diff(soft_limit(np.linspace(0.8, 1.5, 50, dtype=np.float32))) > 0)   # rises smoothly through the useful range
+    assert np.all(np.diff(soft_limit(np.linspace(0.8, 5, 50, dtype=np.float32))) >= 0)    # and never turns back down
+
+
+def test_fx_chain_with_only_gain_leaves_normal_levels_alone():
+    from raven2.audio_fx import FxChain
+    x = (np.sin(np.linspace(0, 200, 5000)) * 0.6).astype(np.float32)
+    assert np.allclose(FxChain(22050, {"gain": 1.0}).process(x), x)    # Charles's chain: no coloring at normal level
+
+
+# Real voices (skipped when the voice files aren't installed): the guard against the actual symptoms.
+def _real(pid):
+    from raven2 import personas as P
+    from raven2.backends.piper_tts import PiperTTS, ensure_voice
+    from raven2.interfaces import AssetMissing
+    persona = P.load_all()[pid]
+    try:
+        ensure_voice(persona.voice.model)
+    except AssetMissing:
+        pytest.skip(f"{pid}'s voice isn't installed")
+    return persona.voice, PiperTTS
+
+
+LINES = ["The status module pins a one-line status bar to the bottom of the terminal. It shows what Claude is doing.",
+         "Mmm, I'm up, baby. Ready when you are. Anything for you, daddy!", "Three tests failed. Want me to look at the first one?"]
+
+
+@pytest.mark.parametrize("pid", ["dottie", "charles", "raven"])
+def test_real_voices_never_clip_and_sit_at_a_healthy_level(pid):
+    voice, TTS = _real(pid)
+    tts = TTS()
+    for line in LINES:
+        x = np.concatenate([c.samples for c in tts.synthesize(line, voice)])
+        assert int((np.abs(x) >= 0.999).sum()) == 0, (pid, line)  # clipping is what sounded like crackle
+        assert 0.4 < float(np.abs(x).max()) < 0.97, (pid, line)
+
+
+@pytest.mark.parametrize("pid", ["dottie", "charles"])
+def test_real_voices_really_are_about_30_percent_faster(pid):
+    voice, TTS = _real(pid)
+    text = LINES[0]
+    def secs(speed):
+        chunks = list(TTS(speed=speed).synthesize(text, voice))
+        return sum(len(c.samples) for c in chunks) / chunks[0].sample_rate
+    assert 1.22 < secs(1.0) / secs(1.3) < 1.38                    # was only ~1.18x before calibrating
