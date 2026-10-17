@@ -1,12 +1,13 @@
 """Simple desktop UI: menubar icon + window with the conversation, live worker status, typed input, a persona
 picker, and a button that opens the live Claude Code session in a terminal (taking it over from Raven).
 
-The window is only a view/controller over `Assistant`; closing it hides it to the menubar and the push-to-talk
-hotkey keeps working."""
+The window is only a view/controller over `Assistant`. Closing it quits the app (and shuts the background Claude
+down); "Hide window" in the menubar menu keeps Raven running with push-to-talk and no window."""
 
 from __future__ import annotations
 
 import html
+import signal
 import threading
 
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
@@ -204,9 +205,29 @@ class RavenWindow(QWidget):
             self.persona.setCurrentIndex(cur)
             self.persona.blockSignals(False)
 
-    def closeEvent(self, e) -> None:  # hide to the menubar; the hotkey keeps working
-        e.ignore()
-        self.hide()
+    hide_on_close = False
+
+    def closeEvent(self, e) -> None:
+        """Closing the window quits Raven, as people expect. (Hiding instead left an invisible process running
+        in the launching terminal.) Use the menubar's "Hide window" to keep the hotkey without a window."""
+        if self.hide_on_close:
+            e.ignore()
+            self.hide()
+            return
+        e.accept()
+        QApplication.instance().quit()
+
+
+def shutdown(asst: Assistant) -> None:
+    """Stop speaking and shut the background Claude down so no orphan `claude` process is left behind."""
+    try:
+        asst.barge_in()
+    except Exception:
+        pass
+    try:
+        asst.svc.worker.close()
+    except Exception:
+        pass
 
 
 def run_ui(asst: Assistant, enable_ptt: bool = True) -> int:
@@ -224,14 +245,22 @@ def run_ui(asst: Assistant, enable_ptt: bool = True) -> int:
     show.triggered.connect(lambda: (win.show(), win.raise_(), win.activateWindow()))
     term = QAction("Open Claude session in Terminal / Hand back")
     term.triggered.connect(win._toggle_manual)
-    quit_ = QAction("Quit")
+    hide = QAction("Hide window (keep running)")
+    hide.triggered.connect(win.hide)
+    quit_ = QAction("Quit Raven")
     quit_.triggered.connect(app.quit)
-    for a in (show, term, quit_):
+    for a in (show, hide, term, quit_):
         menu.addAction(a)
     tray.setContextMenu(menu)
     tray.activated.connect(lambda reason: show.trigger() if reason == QSystemTrayIcon.Trigger else None)
     tray.show()
     win.show()
+
+    app.aboutToQuit.connect(lambda: shutdown(asst))
+    signal.signal(signal.SIGINT, lambda *_: app.quit())  # Ctrl+C in the launching terminal quits cleanly
+    pulse = QTimer()                                     # lets Python run the signal handler while Qt is idle
+    pulse.start(250)
+    pulse.timeout.connect(lambda: None)
 
     def boot():
         try:

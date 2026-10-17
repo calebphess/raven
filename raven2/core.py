@@ -53,6 +53,7 @@ class Assistant:
         self._tools = 0
         self._persona_changed = False
         self._ask_kind = ""
+        self._manual_terminal = None
         # Worker-turn state. Raven only speaks an ack and short progress lines itself; Claude's own
         # <raven> blocks are spoken verbatim and are the real answer.
         self._working = False
@@ -272,7 +273,7 @@ class Assistant:
         self._working, self._activity = False, []
         self._st("manual")
         try:
-            terminal.open_in_terminal(cmd, config.load_file().get("terminal", "Terminal"))
+            self._manual_terminal = terminal.open_in_terminal(cmd, config.load_file().get("terminal", "Terminal"))
         except Exception:
             w.attach()  # the terminal never opened; don't leave Raven paused
             self._st("idle")
@@ -280,7 +281,16 @@ class Assistant:
         return info
 
     def hand_back(self) -> None:
-        self.svc.worker.attach()
+        """Take the session back. The hand-driven Claude process is stopped and its window closed FIRST:
+        resuming while it still runs would put two writers on one session. If it can't be stopped, this
+        raises and Raven stays paused."""
+        w = self.svc.worker
+        info = w.session_info()
+        if info:
+            terminal.stop_session(info["session_id"])
+        terminal.close_window(self._manual_terminal)
+        self._manual_terminal = None
+        w.attach()
         self._st("idle")
 
     def prepare(self, persona: P.Persona | None = None) -> None:

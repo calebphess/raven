@@ -71,6 +71,24 @@ def _show_status(asst) -> None:
         asst.status = st
 
 
+def detached_argv(argv: list[str]) -> list[str]:
+    """The command that re-runs this same invocation in the background (without --detach)."""
+    return [sys.executable, "-m", "raven2.cli", *[x for x in argv if x != "--detach"]]
+
+
+def _detach(argv: list[str]) -> int:
+    import subprocess
+
+    log = config.HOME / "logs" / "ui.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    env = {k: v for k, v in os.environ.items() if k != "RAVEN"}
+    with open(log, "ab") as f:
+        p = subprocess.Popen(detached_argv(argv), stdin=subprocess.DEVNULL, stdout=f, stderr=f, env=env,
+                             start_new_session=True)  # its own session: closing this terminal won't kill it
+    print(f"Raven UI started in the background (pid {p.pid}). Log: {log}\nQuit it from its window or the menubar icon.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="raven2")
     ap.add_argument("--profile")
@@ -83,14 +101,18 @@ def main(argv: list[str] | None = None) -> int:
     pp.add_argument("arg", nargs="?")
     for name, h in (("run", "push-to-talk voice loop (hold Right Option)"), ("chat", "typed input, spoken replies (no mic needed)")):
         sub.add_parser(name, help=h).add_argument("--no-intro", action="store_true", help="skip the spoken startup greeting")
-    sub.add_parser("ui", help="menubar app + window (push-to-talk keeps working when the window is closed)")
+    up = sub.add_parser("ui", help="menubar app + window; closing the window quits")
+    up.add_argument("--detach", action="store_true", help="run in the background and give the terminal back")
     sp = sub.add_parser("say", help="speak a line in a persona's voice")
     sp.add_argument("text")
     sp.add_argument("--persona")
     sp.add_argument("--raw", action="store_true", help="skip persona effects and pitch (plain base voice)")
     sub.add_parser("profile", help="show the resolved profile")
 
-    a = ap.parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    a = ap.parse_args(raw)
+    if a.cmd == "ui" and a.detach:
+        return _detach(raw)
     if a.cmd == "personas":
         try:
             return _personas(a)

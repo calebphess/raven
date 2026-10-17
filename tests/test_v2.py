@@ -599,7 +599,8 @@ def test_session_prompt_encodes_the_voice_and_brevity_rules():
     assert {"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"} <= set(DISALLOWED_TOOLS)
 
 
-def test_each_message_to_claude_carries_the_live_persona(monkeypatch, tmp_path):
+def test_persona_reaches_claude_as_hook_context_not_in_the_message(monkeypatch, tmp_path):
+    import asyncio
     from raven2.backends.claude_worker import ClaudeWorker
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
     cw = ClaudeWorker()
@@ -608,10 +609,15 @@ def test_each_message_to_claude_carries_the_live_persona(monkeypatch, tmp_path):
     cw._send = fake_send
     cw.controls = a
     cw.send("what's up"); time.sleep(0.2)
-    assert sent[0].startswith("<raven-context>") and "Active persona: Dottie" in sent[0] and sent[0].endswith("what's up")
-    a.set_persona("charles")
-    cw.send("again"); time.sleep(0.2)
-    assert "Active persona: Charles" in sent[1] and "butler" in sent[1].lower()
+    assert sent == ["what's up"]                       # the user's message is passed through untouched
+    def hook():
+        return asyncio.run_coroutine_threadsafe(cw._persona_hook({}, None, None), cw._loop).result(5)
+    out = hook()["hookSpecificOutput"]
+    assert out["hookEventName"] == "UserPromptSubmit" and "Active persona: Dottie" in out["additionalContext"]
+    a.set_persona("charles")                           # follows a live switch, no restart needed
+    assert "Active persona: Charles" in hook()["hookSpecificOutput"]["additionalContext"]
+    cw.controls = None
+    assert hook() == {}
     cw.close()
 
 
@@ -975,3 +981,96 @@ def test_a_broken_utterance_never_silences_later_speech(monkeypatch, tmp_path):
 def test_chat_is_a_method_of_brain():
     from raven2.brain import Brain
     assert callable(getattr(Brain, "chat")) and callable(getattr(Brain, "progress")) and callable(getattr(Brain, "intro"))
+
+
+# ── hand-back really ends the hand-driven session ──
+import signal as _signal
+import sys as _sys
+
+
+def _spawn(sid, extra=(), ignore_term=False):
+    code = ("import signal,time;" + ("signal.signal(signal.SIGTERM, signal.SIG_IGN);" if ignore_term else "")
+            + "time.sleep(120)")
+    return subprocess.Popen([_sys.executable, "-c", code, "--resume", sid, *extra])
+
+
+def test_stop_session_ends_the_manual_claude_process():
+    sid = "sess-stop-1"
+    p = _spawn(sid)
+    time.sleep(0.5)
+    assert p.pid in T.session_pids(sid)
+    T.stop_session(sid, timeout=5)
+    assert p.wait(timeout=5) is not None and T.session_pids(sid) == []
+
+
+def test_stop_session_escalates_to_kill_when_term_is_ignored():
+    sid = "sess-stop-2"
+    p = _spawn(sid, ignore_term=True)
+    time.sleep(0.5)
+    T.stop_session(sid, timeout=1)
+    assert p.wait(timeout=5) == -_signal.SIGKILL
+
+
+def test_stop_session_never_touches_the_sdk_workers_own_process():
+    sid = "sess-stop-3"
+    worker = _spawn(sid, extra=("--input-format", "stream-json"))     # how the SDK launches claude
+    time.sleep(0.5)
+    try:
+        assert worker.pid not in T.session_pids(sid)
+        T.stop_session(sid)                                            # nothing to stop: must not raise
+        assert worker.poll() is None                                   # and the worker is still alive
+    finally:
+        worker.kill()
+
+
+def test_stop_session_with_nothing_running_is_fine():
+    T.stop_session("sess-that-does-not-exist")
+
+
+def test_open_in_terminal_returns_a_handle_for_closing_the_window(monkeypatch):
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, "4812|/dev/ttys005\n", ""))
+    h = T.open_in_terminal("echo hi")
+    assert (h.app, h.window_id, h.tty) == ("Terminal", "4812", "/dev/ttys005")
+    assert "first window whose id is 4812" in T.close_script_for(h)
+
+
+def test_close_window_is_a_noop_without_a_handle(monkeypatch):
+    called = []
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: called.append(a))
+    T.close_window(None); T.close_window(T.Handle("Terminal", ""))
+    assert called == []
+
+
+def test_hand_back_stops_the_session_then_closes_the_window_then_resumes(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    order = []
+    monkeypatch.setattr(T, "open_in_terminal", lambda cmd, app="Terminal": T.Handle("Terminal", "77", "/dev/ttys009"))
+    monkeypatch.setattr(T.shutil, "which", lambda n: "/bin/claude")
+    monkeypatch.setattr(T, "stop_session", lambda sid, timeout=8.0: order.append(("stop", sid)))
+    monkeypatch.setattr(T, "close_window", lambda h: order.append(("close", h.window_id if h else None)))
+    orig_attach = w.attach
+    w.attach = lambda: (order.append(("attach",)), orig_attach())
+    a.open_manual_session()
+    a.hand_back()
+    assert order == [("stop", "sess-1"), ("close", "77"), ("attach",)]   # never resume while it still runs
+    assert not a.manual and a._manual_terminal is None
+
+
+def test_hand_back_refuses_to_resume_if_the_session_cannot_be_stopped(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    monkeypatch.setattr(T, "open_in_terminal", lambda cmd, app="Terminal": T.Handle("Terminal", "77"))
+    monkeypatch.setattr(T.shutil, "which", lambda n: "/bin/claude")
+    def stuck(sid, timeout=8.0): raise RuntimeError("the Claude session is still running in the terminal")
+    closed = []
+    monkeypatch.setattr(T, "stop_session", stuck)
+    monkeypatch.setattr(T, "close_window", lambda h: closed.append(h))
+    a.open_manual_session()
+    with pytest.raises(RuntimeError, match="still running"):
+        a.hand_back()
+    assert a.manual and closed == []                    # still paused, window untouched, nothing resumed
+
+
+def test_detach_reruns_the_same_command_in_the_background_without_the_flag():
+    from raven2 import cli
+    argv = ["--worker", "claude", "--cwd", "/w", "ui", "--detach"]
+    assert cli.detached_argv(argv) == [_sys.executable, "-m", "raven2.cli", "--worker", "claude", "--cwd", "/w", "ui"]

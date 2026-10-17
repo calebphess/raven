@@ -114,8 +114,30 @@ def test_persona_picker_switches_the_live_persona(ui):
     assert pump(qapp, lambda: a.persona.id == "charles")
 
 
-def test_closing_the_window_hides_it_instead_of_quitting(ui):
+def test_closing_the_window_quits_the_app(ui, monkeypatch):
     qapp, win, a, w, opened, bridge = ui
+    quits = []
+    monkeypatch.setattr(QApplication, "quit", staticmethod(lambda: quits.append(1)))
     win.show()
     win.close()
-    assert not win.isVisible()
+    assert quits == [1]
+
+
+def test_hide_on_close_is_opt_in(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    quits = []
+    monkeypatch.setattr(QApplication, "quit", staticmethod(lambda: quits.append(1)))
+    win.hide_on_close = True
+    win.show(); win.close()
+    assert quits == [] and not win.isVisible()
+
+
+def test_shutdown_stops_the_background_claude_and_survives_errors(ui):
+    from raven2.ui import shutdown
+    qapp, win, a, w, opened, bridge = ui
+    closed = []
+    w.close = lambda: closed.append(1)
+    shutdown(a)
+    assert closed == [1]
+    w.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
+    shutdown(a)                                  # an error while shutting down must not block quitting

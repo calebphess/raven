@@ -22,7 +22,7 @@ SESSION_PROMPT = (
     "text inside <raven> tags verbatim in the active persona's voice, so write it exactly as it should be "
     "said aloud: plain, conversational sentences; no markdown, lists, code, file paths or URLs (describe "
     "them instead); numbers the way you would say them. Write it in the voice of the persona described in "
-    "the <raven-context> note that precedes each user message (tone only; keep facts exact). You may "
+    "the persona note Raven attaches as context to each message (tone only; keep facts exact). You may "
     "use several <raven> blocks in one turn (for example a quick heads-up before a long task), but always "
     "END the turn with a <raven> block that contains the result or your question.\n\n"
     "BE BRIEF. HARD LIMIT: each <raven> block is at most about 35 words (three short sentences) unless the "
@@ -105,8 +105,6 @@ class ClaudeWorker:
     # ── public (thread-safe) ──
     def send(self, text: str) -> None:
         self._turn += 1
-        if self.controls is not None:  # the persona can change between turns, so say who is speaking every time
-            text = f"<raven-context>{self.controls.persona_brief()}</raven-context>\n\n{text}"
         asyncio.run_coroutine_threadsafe(self._send(text, self._turn), self._loop)
 
     def interrupt(self) -> None:
@@ -163,7 +161,7 @@ class ClaudeWorker:
 
     async def _ensure(self):
         if self._client is None:
-            from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient
+            from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, HookMatcher
 
             prompt, extra = SESSION_PROMPT, {}
             if self.controls is not None:
@@ -180,12 +178,22 @@ class ClaudeWorker:
                 env={"RAVEN": ""},
                 system_prompt={"type": "preset", "preset": "claude_code", "append": prompt},
                 disallowed_tools=DISALLOWED_TOOLS,
+                hooks={"UserPromptSubmit": [HookMatcher(hooks=[self._persona_hook])]},
                 resume=self.session_id if self._resume_next else None,
                 **extra,
             )
             self._client = ClaudeSDKClient(options=opts)
             await self._client.connect()
         return self._client
+
+    async def _persona_hook(self, input_data, tool_use_id, context):
+        """UserPromptSubmit hook: attach who is speaking right now as context, on every turn, without touching
+        the user's message. (Prefixing the message text put a paragraph of persona into every prompt, which
+        showed up highlighted in the transcript when the session was opened by hand.)"""
+        if self.controls is None:
+            return {}
+        return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit",
+                                       "additionalContext": self.controls.persona_brief()}}
 
     def _raven_server(self):
         """In-process MCP server: the only way Claude touches the live Raven session."""
