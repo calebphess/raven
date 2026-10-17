@@ -141,3 +141,21 @@ def test_shutdown_stops_the_background_claude_and_survives_errors(ui):
     assert closed == [1]
     w.close = lambda: (_ for _ in ()).throw(RuntimeError("boom"))
     shutdown(a)                                  # an error while shutting down must not block quitting
+
+
+def test_window_uses_the_dark_theme(ui):
+    qapp, win, a, w, opened, bridge = ui
+    from PySide6.QtGui import QPalette
+    pal = qapp.palette()
+    lum = lambda c: 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+    assert lum(pal.color(QPalette.Window)) < 60 and lum(pal.color(QPalette.Base)) < 50   # dark surfaces
+    assert lum(pal.color(QPalette.WindowText)) > 180                                      # light text
+
+
+def test_theme_colors_are_dark_mode_safe():
+    from raven2.ui import THEME, _COLORS, render_entries
+    def lum(h): return 0.299 * int(h[1:3], 16) + 0.587 * int(h[3:5], 16) + 0.114 * int(h[5:7], 16)
+    assert all(lum(c) > 120 for c in _COLORS.values())      # every status color is readable on the dark window
+    html = render_entries([("you", "hi"), ("Dottie", "yo"), ("!", "err"), ("·", "log")])
+    assert THEME["you"] in html and THEME["error"] in html and THEME["muted"] in html
+    assert "#2f8fd0" not in html and "#d03a3a" not in html  # no leftover light-theme colors

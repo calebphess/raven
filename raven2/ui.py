@@ -11,15 +11,41 @@ import signal
 import threading
 
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPushButton, QSystemTrayIcon, QTextEdit, QVBoxLayout, QWidget)
 
 from .core import Assistant, StartupError
 from .status import Status
 
-_COLORS = {"working": "#d9a400", "waiting": "#b04fd0", "done": "#2e9e4f", "error": "#d03a3a",
-           "manual": "#2f8fd0", "idle": "#8a8a8a"}
+# Dark theme. Status and transcript colors are chosen for contrast on a dark background.
+THEME = {"window": "#1e1f24", "base": "#16171b", "button": "#2b2d33", "text": "#e6e6e6", "muted": "#8b8f98",
+         "accent": "#3b82f6", "you": "#6cb6ff", "error": "#ff6b6b", "border": "#383b43"}
+_COLORS = {"working": "#f2c14e", "waiting": "#c792ea", "done": "#5fd38d", "error": THEME["error"],
+           "manual": THEME["you"], "idle": THEME["muted"]}
+
+
+def apply_dark(app: QApplication) -> None:
+    """Dark palette on the cross-platform Fusion style (the native macOS style ignores most of the palette)."""
+    app.setStyle("Fusion")
+    t = {k: QColor(v) for k, v in THEME.items()}
+    pal = QPalette()
+    for role, key in ((QPalette.Window, "window"), (QPalette.Base, "base"), (QPalette.AlternateBase, "window"),
+                      (QPalette.Button, "button"), (QPalette.ToolTipBase, "button"), (QPalette.Highlight, "accent")):
+        pal.setColor(role, t[key])
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText, QPalette.ToolTipText,
+                 QPalette.HighlightedText, QPalette.BrightText):
+        pal.setColor(role, t["text"])
+    pal.setColor(QPalette.PlaceholderText, t["muted"])
+    pal.setColor(QPalette.Link, t["you"])
+    for role in (QPalette.WindowText, QPalette.Text, QPalette.ButtonText):  # greyed-out controls
+        pal.setColor(QPalette.Disabled, role, t["muted"])
+    app.setPalette(pal)
+    app.setStyleSheet(
+        f"QTextEdit, QLineEdit, QComboBox {{ border: 1px solid {THEME['border']}; border-radius: 6px; padding: 6px; }}"
+        f"QPushButton {{ border: 1px solid {THEME['border']}; border-radius: 6px; padding: 6px 12px; }}"
+        f"QPushButton:hover {{ background: #353841; }} QPushButton:disabled {{ color: {THEME['muted']}; }}"
+        f"QComboBox QAbstractItemView {{ background: {THEME['base']}; selection-background-color: {THEME['accent']}; }}")
 
 
 def render_entries(entries: list[tuple[str, str]]) -> str:
@@ -35,11 +61,11 @@ def render_entries(entries: list[tuple[str, str]]) -> str:
     for who, text in merged:
         t = html.escape(text)
         if who == "you":
-            out.append(f'<p style="margin:6px 0"><b style="color:#2f8fd0">You</b><br>{t}</p>')
+            out.append(f'<p style="margin:6px 0"><b style="color:{THEME["you"]}">You</b><br>{t}</p>')
         elif who == "!":
-            out.append(f'<p style="margin:6px 0;color:#d03a3a">{t}</p>')
+            out.append(f'<p style="margin:6px 0;color:{THEME["error"]}">{t}</p>')
         elif who == "·":
-            out.append(f'<p style="margin:6px 0;color:#8a8a8a"><i>{t}</i></p>')
+            out.append(f'<p style="margin:6px 0;color:{THEME["muted"]}"><i>{t}</i></p>')
         else:
             out.append(f'<p style="margin:6px 0"><b>{html.escape(who)}</b><br>{t}</p>')
     return "".join(out)
@@ -83,6 +109,7 @@ def make_icon() -> QIcon:
 class RavenWindow(QWidget):
     def __init__(self, asst: Assistant, bridge: Bridge):
         super().__init__()
+        apply_dark(QApplication.instance())
         self.asst, self.bridge = asst, bridge
         self.entries: list[tuple[str, str]] = []
         self.setWindowTitle("Raven")
