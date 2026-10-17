@@ -251,7 +251,7 @@ def test_approval_callback_fails_closed():
     ctx = types.SimpleNamespace(title=None)
     r = asyncio.run_coroutine_threadsafe(w._can_use_tool("Write", {"file_path": "/a/b.txt"}, ctx), w._loop)
     import time
-    for _ in range(50):
+    for _ in range(300):  # generous: this thread can be slow to start when the machine is busy
         if events: break
         time.sleep(0.05)
     assert events[0].kind == "ask" and events[0].data["ask_type"] == "permission"
@@ -401,7 +401,7 @@ def test_persona_switch_plus_real_work_still_gets_a_readout(monkeypatch, tmp_pat
 
 
 @pytest.mark.parametrize("pieces,expected", [
-    (["The stock closed at $186", ".", "03", ", down", " 7%", " today", "."], ["The stock closed at $186.03,", "down 7% today."]),
+    (["The stock closed at $186", ".", "03", ", down", " 7%", " today", "."], ["The stock closed at $186.03, down 7% today."]),
     (["It costs $1", ",", "000", " dollars", ".", " Cheap", "."], ["It costs $1,000 dollars.", "Cheap."]),
     (["Version 3", ".", "5", " is out", "."], ["Version 3.5 is out."]),
     (["Done", "."], ["Done."]),
@@ -755,3 +755,26 @@ def test_voice_command_runs_the_takeover(monkeypatch, tmp_path):
     assert a.manual and "Opening Claude in the terminal." in spoken and w.sent == []
     a.handle_text("hand it back"); a.wait()
     assert not a.manual and "Back in control." in spoken
+
+
+def test_commas_do_not_split_a_sentence_into_separate_utterances():
+    text = ("Jordan Alexander Rivers, goes by Alex, Springfield Illinois address, born June second, nineteen "
+            "eighty-eight, from Peoria, Illinois. I inferred Alexander from the spelling, so correct me if "
+            "that's wrong.")
+    from raven2.brain import verbatim_chunks
+    chunks = list(verbatim_chunks(text))
+    assert " ".join(chunks) == text                      # nothing lost or reordered
+    assert all(c.rstrip()[-1] in ".!?" for c in chunks)  # every chunk ends at a real sentence end
+    assert len(chunks) <= 2
+
+
+def test_streamed_tokens_also_chunk_at_sentence_ends_only():
+    pieces = ["Systems", " initialized", ",", " all", " green", ".", " Available", " to", " assist", "."]
+    assert list(clauses(iter(pieces))) == ["Systems initialized, all green.", "Available to assist."]
+
+
+def test_a_very_long_run_with_no_sentence_end_falls_back_to_a_comma_cut():
+    long = ", ".join(f"item number {i}" for i in range(30))   # ~450 chars, no sentence end
+    chunks = list(clauses(iter([long])))
+    assert len(chunks) >= 2 and " ".join(chunks) == long
+    assert all(len(c) <= 170 for c in chunks)

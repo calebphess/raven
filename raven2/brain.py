@@ -50,19 +50,25 @@ def limit_sentences(pieces: Iterator[str], n: int) -> Iterator[str]:
         yield piece
 
 
-# A boundary is punctuation FOLLOWED by whitespace, so "$186.03" and "1,000" are never cut mid-number.
-_BOUNDARY = re.compile(r"[.!?;:,…](?=\s)|\n")
+# Sentence ends followed by whitespace, so "$186.03" and "1,000" are never cut mid-number. Commas are NOT
+# boundaries: each chunk is synthesized on its own (with its own start/stop pause), so cutting at commas made
+# one sentence sound like several clipped ones.
+_SENTENCE = re.compile(r"[.!?…](?=\s)|\n")
+_SOFT = re.compile(r"[,;:](?=\s)")  # only a fallback for a very long run with no sentence end
 
 
-def clauses(pieces: Iterator[str], first_min: int = 12, min_len: int = 30) -> Iterator[str]:
-    """Group streamed tokens into speakable chunks. The first chunk is cut early (latency),
-    later ones wait for a sentence-ish boundary so prosody stays natural."""
+def clauses(pieces: Iterator[str], first_min: int = 12, min_len: int = 30, max_len: int = 160) -> Iterator[str]:
+    """Group streamed tokens into speakable chunks at sentence boundaries. The first chunk may be short
+    (latency); later ones wait for a sentence end of at least min_len characters so prosody stays natural.
+    Only if max_len characters pass with no sentence end is the text cut at the last comma."""
     buf, n = "", 0
     for piece in pieces:
         buf += piece
         while True:
             limit = first_min if n == 0 else min_len
-            cut = next((m.end() for m in _BOUNDARY.finditer(buf) if len(buf[: m.end()].strip()) >= limit), None)
+            cut = next((m.end() for m in _SENTENCE.finditer(buf) if len(buf[: m.end()].strip()) >= limit), None)
+            if cut is None and len(buf) > max_len:
+                cut = next((m.end() for m in reversed(list(_SOFT.finditer(buf, 0, max_len))) if m.end() >= limit), None)
             if cut is None:
                 break
             yield buf[:cut].strip()
