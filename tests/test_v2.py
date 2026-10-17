@@ -66,7 +66,7 @@ def test_clause_chunking_first_chunk_early():
 
 
 class FakeLLM:
-    def stream(self, messages, max_tokens=160):
+    def stream(self, messages, max_tokens=160, temperature=None):
         self.messages = messages
         yield from ["Hello there, friend.", " All good."]
 
@@ -160,13 +160,24 @@ def make_with_worker(monkeypatch, tmp_path):
     return Assistant(svc, allp, log=lambda m: None), w, llm, spoken
 
 
-def test_worker_gets_message_and_instant_ack(monkeypatch, tmp_path):
+def test_worker_gets_message_and_generated_ack(monkeypatch, tmp_path):
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
     a.handle_text("run the tests")
     a.wait()
     assert w.sent == ["run the tests"]
-    assert spoken[0] in a.persona.acks  # persona-flavored ack, no LLM round trip
-    assert not hasattr(llm, "messages")  # front brain didn't chat; it's waiting on the worker
+    assert spoken == ["Hello there, friend. All good."]  # LLM output, not canned
+    assert "run the tests" not in str(llm.messages)  # the model never sees the request, so it can't answer it
+
+
+def test_ack_falls_back_to_canned_line_when_llm_fails(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    def boom(messages, max_tokens=160, temperature=None):
+        raise RuntimeError("model died")
+        yield
+    llm.stream = boom
+    a.handle_text("run the tests")
+    a.wait()
+    assert spoken and spoken[0] in a.persona.acks and w.sent == ["run the tests"]
 
 
 def test_done_event_is_summarized_and_spoken(monkeypatch, tmp_path):
@@ -238,3 +249,19 @@ def test_approval_callback_fails_closed():
     w.answer("deny", "no")
     assert r.result(timeout=5).behavior == "deny"
     w.close()
+
+
+def test_ack_that_answers_or_claims_results_is_dropped(monkeypatch, tmp_path):
+    for bad in ("There are 12 files in the src folder.", "Repository uploaded.", "The tests passed."):
+        a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+        llm.stream = lambda messages, max_tokens=160, temperature=None, _b=bad: iter([_b])
+        a.handle_text("how many files are there")
+        a.wait()
+        assert spoken and spoken[0] in a.persona.acks, bad  # canned fallback instead of misinformation
+
+
+def test_canned_ack_mode_skips_the_model(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a.ack_mode = "canned"
+    a.handle_text("run the tests"); a.wait()
+    assert spoken[0] in a.persona.acks and not hasattr(llm, "messages")

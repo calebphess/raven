@@ -76,3 +76,29 @@ class Brain:
         finally:
             if spoken:
                 self.history.append({"role": "assistant", "content": " ".join(spoken)})
+
+    _CLAIM = re.compile(
+        r"\d|\b(there (is|are)|exists?|contains?|uploaded|pushed|committed|created|deleted|found|"
+        r"done|finished|complete[d]?|fixed|passed|failed|unchanged|updated|repository|unclear|awaited|"
+        r"please|status|defined)\b", re.I)
+
+    def acknowledge(self, text: str) -> Iterator[str]:
+        """Instant, in-voice acknowledgement while the worker starts.
+
+        The model is deliberately NOT shown the request. Shown it, a 1B model tends to answer
+        ("Nine files are in the src folder") — spoken misinformation before the worker has done anything.
+        Without it, it can only emit a short in-character 'on it'. The reply is still validated, and
+        yielding nothing makes the caller fall back to a canned persona line."""
+        system = (self.persona.personality.replace("{user}", self.user_name or "the user")
+                  + " The user has just handed you a task and you are starting on it. Say one very short "
+                  "acknowledgement, at most 6 words, no quotation marks. You do not know what the task is.")
+        replies = self.persona.acks or ["On it."]
+        messages = [{"role": "system", "content": system}]
+        for r in replies[:3]:  # the persona's own lines teach voice
+            messages += [{"role": "user", "content": "Acknowledge."}, {"role": "assistant", "content": r}]
+        messages.append({"role": "user", "content": "Acknowledge."})
+        out = "".join(self.llm.stream(messages, max_tokens=14, temperature=1.0)).replace('"', "").strip()
+        if not out or len(out.split()) > 8 or self._CLAIM.search(out):
+            return
+        self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": out}]
+        yield out

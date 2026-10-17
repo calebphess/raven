@@ -22,9 +22,9 @@ class LlamaCppLLM:
             self._llm = Llama(model_path=str(self._path), **self._kw)
         return self._llm
 
-    def stream(self, messages: list[dict], max_tokens: int = 160) -> Iterator[str]:
+    def stream(self, messages: list[dict], max_tokens: int = 160, temperature: float | None = None) -> Iterator[str]:
         gen = self._load().create_chat_completion(messages=messages, max_tokens=max_tokens,
-                                                  temperature=self._temp, stream=True)
+                                                  temperature=self._temp if temperature is None else temperature, stream=True)
         try:
             for chunk in gen:
                 piece = chunk["choices"][0]["delta"].get("content")

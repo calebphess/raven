@@ -23,8 +23,9 @@ class Services:
 
 
 class Assistant:
-    def __init__(self, svc: Services, personas: dict[str, P.Persona], log: Callable[[str], None] = print):
-        self.svc, self.personas, self.log = svc, personas, log
+    def __init__(self, svc: Services, personas: dict[str, P.Persona], log: Callable[[str], None] = print,
+                 ack_mode: str = "generated"):
+        self.svc, self.personas, self.log, self.ack_mode = svc, personas, log, ack_mode
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -60,10 +61,21 @@ class Assistant:
         w.send(text)  # always forwarded (interrupting any running turn); the worker decides what to do
         if getattr(w, "background", True):
             self._tools = 0
-            ack = random.choice(self.persona.acks or ["On it."])
-            self.say(ack)
+            self._start(lambda: self._ack(text))
         else:
             self._start(lambda: self.svc.brain.reply(text))
+
+    def _ack(self, text: str):
+        """Generated acknowledgement; falls back to a canned persona line if the model fails."""
+        spoke = False
+        try:
+            for c in (self.svc.brain.acknowledge(text) if self.ack_mode == "generated" else ()):
+                spoke = True
+                yield c
+        except Exception as e:
+            self.log(f"[ack fallback] {type(e).__name__}: {e}")
+        if not spoke:
+            yield random.choice(self.persona.acks or ["On it."])
 
     # ── worker events ──
     def _answer_pending(self, text: str) -> None:

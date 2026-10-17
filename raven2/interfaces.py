@@ -35,7 +35,7 @@ class STT(Protocol):
 
 @runtime_checkable
 class LLM(Protocol):
-    def stream(self, messages: list[dict], max_tokens: int = 160) -> Iterator[str]:
+    def stream(self, messages: list[dict], max_tokens: int = 160, temperature: float | None = None) -> Iterator[str]:
         """Yield text pieces. Closing the generator must cancel generation."""
         ...
 

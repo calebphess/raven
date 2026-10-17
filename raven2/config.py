@@ -26,6 +26,7 @@ PROFILES: dict[str, dict] = {
         "tts": {"backend": "piper"},
         "audio_out": {"backend": "sounddevice"},
         "worker": {"backend": "null"},
+        "ack": "generated",  # or "canned": persona lines, instant, no model call
     },
     "apple-silicon": {
         "stt": {"backend": "faster-whisper", "model": "small", "compute_type": "int8"},
@@ -33,6 +34,7 @@ PROFILES: dict[str, dict] = {
         "tts": {"backend": "piper"},
         "audio_out": {"backend": "sounddevice"},
         "worker": {"backend": "null"},
+        "ack": "generated",
     },
 }
 DEFAULT_PROFILE = "intel-cpu"

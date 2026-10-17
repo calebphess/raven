@@ -24,4 +24,4 @@ def build(profile_name: str | None = None, persona_id: str | None = None, log=pr
     user, _ = config.user_identity()
     svc = Services(stt=make("stt"), tts=make("tts"), out=make("audio_out"),
                    worker=make("worker"), brain=Brain(make("llm"), persona, user))
-    return Assistant(svc, allp, log)
+    return Assistant(svc, allp, log, ack_mode=profile.get("ack", "generated"))
