@@ -28,8 +28,9 @@ class StartupError(RuntimeError):
 
 class Assistant:
     def __init__(self, svc: Services, personas: dict[str, P.Persona], log: Callable[[str], None] = print,
-                 ack_mode: str = "generated"):
+                 ack_mode: str = "generated", status=None):
         self.svc, self.personas, self.log, self.ack_mode = svc, personas, log, ack_mode
+        self.status = status  # optional raven2.status.Status; None = no visual indicator
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
@@ -46,13 +47,21 @@ class Assistant:
         return self.svc.brain.persona
 
     # ── input ──
+    def _st(self, name: str, *args) -> None:
+        if self.status is not None:
+            getattr(self.status, name)(*args)
+
     def barge_in(self) -> None:
         """User started talking/typing: silence everything immediately."""
         self._cancel.set()
         self.svc.out.cancel()
 
     def handle_audio(self, samples, sample_rate: int = 16_000) -> None:
-        text = self.svc.stt.transcribe(samples, sample_rate)
+        self._st("listen", "transcribing")
+        try:
+            text = self.svc.stt.transcribe(samples, sample_rate)
+        finally:
+            self._st("listen", "")
         if text:
             self.handle_text(text)
 
@@ -67,6 +76,7 @@ class Assistant:
             return self._answer_pending(text)
         w.send(text)  # always forwarded (interrupting any running turn); the worker decides what to do
         if getattr(w, "background", True):
+            self._st("working", True)
             self._tools, self._persona_changed = 0, False
             self._start(lambda: self._ack(text))
         else:
@@ -89,23 +99,28 @@ class Assistant:
         w = self.svc.worker
         if self._ask_kind == "question":
             w.answer("text", text)
+            self._st("working")
             return
         d = approvals.parse_decision(text)
         if d is None:
             return self.say("Sorry, was that a yes or a no?")
         w.answer(d, "" if d != "deny" else "The user said no.")
+        self._st("working")
 
     def _on_worker_event(self, ev: WorkerEvent) -> None:
         if ev.kind == "tool":
             if not ev.text.startswith(("mcp__raven__", "ToolSearch")):  # session plumbing, not user work
                 self._tools += 1
+                self._st("tool")
         elif ev.kind == "ask":
             self._ask_kind = ev.data.get("ask_type", "permission")
+            self._st("waiting", "yes, always, or no?" if self._ask_kind == "permission" else "question")
             if self._ask_kind == "question":
                 self.say(ev.text)
             else:
                 self.say(f"{ev.text.rstrip('.?')}. Yes, always, or no?")
         elif ev.kind == "done":
+            self._st("done")
             if self._persona_changed and self._tools == 0:  # a switch speaks for itself; no readout
                 self._persona_changed = False
                 return
@@ -113,6 +128,7 @@ class Assistant:
             tools, result = self._tools, ev.text or "Finished, with no summary."
             self._start(lambda: self.svc.brain.relay(result, tools), cancel_current=False)
         elif ev.kind == "error":
+            self._st("error", ev.text[:60])
             self.log(f"[worker error] {ev.text}")
             self.say("Something went wrong on the Claude side. Check the log.", cancel_current=False)
 

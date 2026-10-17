@@ -278,7 +278,7 @@ def test_startup_loads_models_then_model_speaks_intro(monkeypatch, tmp_path):
     a.startup()
     a.wait()
     assert order[0] == "stt" and "llm" in order  # models loaded before anything is spoken
-    assert spoken == ["Hello there, friend.", "All good."] and spoken[0] != a.persona.greeting  # generated, not canned
+    assert " ".join(spoken) == "Hello there, friend. All good." and spoken[0] != a.persona.greeting  # generated, not canned
     assert "started up" in llm.messages[-1]["content"]
 
 
@@ -368,7 +368,7 @@ def test_persona_switch_via_claude_announces_itself_without_a_readout(monkeypatc
     w.on_event(WorkerEvent("done", "Switched to Charles."))
     a.wait()
     assert a.persona.id == "charles"
-    assert spoken == ["Hello there, friend.", "All good."]  # the intro only; no relay of "Switched to Charles."
+    assert " ".join(spoken) == "Hello there, friend. All good."  # the intro only; no relay of "Switched to Charles."
     assert "started up" in llm.messages[-1]["content"]
 
 
@@ -379,7 +379,7 @@ def test_tool_search_plumbing_does_not_count_as_work(monkeypatch, tmp_path):
     a.set_persona("charles")
     w.on_event(WorkerEvent("done", "Switched to Charles."))
     a.wait()
-    assert spoken == ["Hello there, friend.", "All good."]
+    assert " ".join(spoken) == "Hello there, friend. All good."
 
 
 def test_persona_switch_plus_real_work_still_gets_a_readout(monkeypatch, tmp_path):
@@ -389,4 +389,82 @@ def test_persona_switch_plus_real_work_still_gets_a_readout(monkeypatch, tmp_pat
     w.on_event(WorkerEvent("tool", "Bash: pytest"))
     w.on_event(WorkerEvent("done", "Switched, then all tests passed."))
     a.wait()
-    assert len(spoken) == 4  # the persona's intro (2 chunks) plus a readout of the real work (2 chunks)
+    assert " ".join(spoken) == "Hello there, friend. All good. " * 1 + "Hello there, friend. All good."  # intro, then a readout of the real work
+
+
+@pytest.mark.parametrize("pieces,expected", [
+    (["The stock closed at $186", ".", "03", ", down", " 7%", " today", "."], ["The stock closed at $186.03,", "down 7% today."]),
+    (["It costs $1", ",", "000", " dollars", ".", " Cheap", "."], ["It costs $1,000 dollars.", "Cheap."]),
+    (["Version 3", ".", "5", " is out", "."], ["Version 3.5 is out."]),
+    (["Done", "."], ["Done."]),
+])
+def test_numbers_are_never_split_across_speech_chunks(pieces, expected):
+    assert list(clauses(iter(pieces))) == expected
+
+
+def test_limit_sentences_ignores_decimal_points():
+    from raven2.brain import limit_sentences
+    assert "".join(limit_sentences(iter(["Up at 3", ".", "5 percent", ".", " Ready", "?", " More."]), 2)) == "Up at 3.5 percent. Ready?"
+
+
+def test_limit_sentences_handles_lone_period_piece_after_digit():
+    from raven2.brain import limit_sentences
+    # "." arrives alone right after "3", then "5": a decimal. Then a real sentence end.
+    assert "".join(limit_sentences(iter(["at 3", ".", "5", " percent", ".", " Next", "."]), 1)) == "at 3.5 percent."
+    # "." after a digit that is NOT followed by a digit is a real end ("in 2024. Then")
+    assert "".join(limit_sentences(iter(["in 2024", ".", " Then it", " rose", "."]), 1)) == "in 2024."
+
+
+# ── status line ──
+import io
+from raven2.status import Status
+
+
+def test_status_states_render_distinct_text():
+    st = Status(stream=io.StringIO(), enabled=True)
+    assert "ready" in st.text()[1]
+    st.working(True); st.tool(); st.tool()
+    assert "working" in st.text()[1] and "2 tools" in st.text()[1]
+    st.waiting("yes, always, or no?")
+    assert "waiting for your answer" in st.text()[1]
+    st.done()
+    assert "finished" in st.text()[1] and "2 tools" in st.text()[1]
+    st.error("boom")
+    assert "error: boom" in st.text()[1]
+    st.listen("listening")
+    assert "listening" in st.text()[1]  # the mic overlay wins while it is up...
+    st.listen("")
+    assert "error" in st.text()[1]  # ...and the worker state is still there after
+
+
+def test_status_disabled_when_not_a_tty():
+    st = Status(stream=io.StringIO())  # StringIO is not a TTY
+    assert not st.enabled
+    st.working(True); st.start(); st.stop()
+    assert st.out.getvalue() == ""  # never writes escape codes into logs or pipes
+
+
+def test_status_paints_bottom_line_and_title():
+    st = Status(stream=io.StringIO(), enabled=True)
+    st.working(True)
+    seq = st.render_once()
+    assert "\0337" in seq and "\0338" in seq and "\033]0;Raven: " in seq and "Claude working" in seq
+
+
+def test_assistant_drives_status(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a.status = Status(stream=io.StringIO(), enabled=True)
+    seen = []
+    a.status._redraw = lambda: seen.append(a.status.text()[1])
+    a.handle_text("run the tests"); a.wait()
+    assert "working" in seen[-1]
+    w.pending = True
+    w.on_event(WorkerEvent("tool", "Bash: pytest"))
+    w.on_event(WorkerEvent("ask", "Claude wants to run a shell command", {"ask_type": "permission"}))
+    assert "waiting for your answer" in seen[-1]
+    a.handle_text("yes"); a.wait()
+    assert "working" in seen[-1]
+    w.on_event(WorkerEvent("done", "All passed")); a.wait()
+    assert "finished" in seen[-1]
+    w.on_event(WorkerEvent("error", "boom"))
+    assert "error" in seen[-1]

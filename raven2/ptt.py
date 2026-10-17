@@ -28,6 +28,7 @@ def run(assistant: Assistant) -> None:
     def stop():
         state["rec"] = False
         if time.monotonic() - state["t0"] < MIN_SECONDS or not frames:
+            assistant._st("listen", "")  # an accidental tap: back to normal
             return
         audio = np.concatenate(frames).flatten()
         threading.Thread(target=assistant.handle_audio, args=(audio,), daemon=True).start()
@@ -35,6 +36,7 @@ def run(assistant: Assistant) -> None:
     def on_press(key):
         if key == Key.alt_r and not state["rec"]:
             assistant.barge_in()
+            assistant._st("listen", "listening")
             frames.clear()
             state.update(rec=True, t0=time.monotonic())
 

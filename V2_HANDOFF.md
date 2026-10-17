@@ -56,3 +56,16 @@ Run: `HF_HUB_OFFLINE=1 env -u RAVEN .venv/bin/python -u spikes/spike_latency.py 
 - Worker: `raven2 --worker claude [--cwd DIR] chat|run`. `raven2/backends/claude_worker.py` (Agent SDK, `RAVEN` blanked, appended session prompt, new send interrupts, approvals via `can_use_tool` fail closed, never auto-allow). Verified against real Claude: file creation, approval ask/allow, mid-run interrupt (`spikes/spike_worker.py`).
 - Front end: instant persona `acks` on hand-off, voiced approvals ("Claude wants to create x. Yes, always, or no?"), spoken yes/no routed back as the answer, 1-sentence persona readout when Claude finishes (`Brain.relay`). 26 tests.
 - Known gaps: readout quality is limited by the 1B model (try 3B); AskUserQuestion answers return to Claude as deny-with-message text; no UI, no remote worker, no streaming progress updates, no V1 removal yet; `--worker claude` isn't in the default profile.
+
+## Persona control + status line (landed)
+- Claude gets `list_personas` / `set_persona` tools (in-process MCP, `RavenControls` interface) and a session prompt that says persona/voice requests mean Raven's personas. A switch makes the new persona announce itself (model-generated intro) and skips the readout.
+- Status line (`raven2/status.py`): pinned bottom line + tab title in `run`/`chat`: `○ ready`, `⠹ Claude working 12s · 3 tools`, `? Claude is waiting for your answer`, `✓ Claude finished in 20s`, `✗ Claude error`, plus a mic overlay (`● listening…`, `◌ transcribing…`). Auto-disabled when not a TTY.
+- Speech chunker never splits numbers (`$186.03`, `1,000`): a boundary is punctuation followed by whitespace.
+
+## Future capabilities (not started)
+- **Install personas by voice via Claude**: a third Raven tool (`install_persona`) so "get me the cowboy" / "install Mochi" downloads the pack from the pack host. Claude should also be told which packs are *available* (host `index.json`), not just installed.
+- Bigger default LLM (3B) for better intros, acks and readouts; `apple-silicon` profile already points at it.
+- Streaming progress readouts while Claude works (currently silent until it finishes).
+- Menubar app + pop-up window, optional hidden "Claude Code shell" view; macOS notification/sound when Claude finishes while the terminal is in the background.
+- Remote worker (Claude on a home machine) and Android shell.
+- Make `--worker claude` the default; remove V1 hooks/installer once V2 is the daily driver.

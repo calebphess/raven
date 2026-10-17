@@ -62,6 +62,15 @@ def _startup(asst, a) -> int:
     return 0
 
 
+def _show_status(asst) -> None:
+    from .status import Status
+
+    st = Status()
+    if st.enabled:
+        st.start()
+        asst.status = st
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="raven2")
     ap.add_argument("--profile")
@@ -115,6 +124,7 @@ def main(argv: list[str] | None = None) -> int:
     elif a.cmd == "chat":
         if _startup(asst, a):
             return 1
+        _show_status(asst)
         print(f"{asst.persona.name} ready. Type to talk; 'quit' exits. Try: list personas / switch to charles")
         while True:
             try:
@@ -131,7 +141,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if _startup(asst, a):
             return 1
-
+        _show_status(asst)
         try:
             ptt.run(asst)
         except KeyboardInterrupt:

@@ -13,7 +13,6 @@ BASE_RULES = (
     "sentences, plain words, no markdown, no lists, no emojis, no stage directions, and never "
     "read out file paths, code, or URLs. Put the answer first."
 )
-_CLAUSE_END = re.compile(r"[.!?;:,…]\s*$|\n")
 
 
 def system_prompt(persona: Persona, user_name: str = "") -> str:
@@ -23,16 +22,36 @@ def system_prompt(persona: Persona, user_name: str = "") -> str:
 
 def limit_sentences(pieces: Iterator[str], n: int) -> Iterator[str]:
     """Stop the token stream right after the n-th sentence end (truncating mid-piece), so the limit holds
-    no matter how the speech chunker groups text. Closing the generator cancels the model."""
-    seen = 0
+    no matter how the speech chunker groups text. A '.' between digits ("3.5") is not a sentence end,
+    including when the '.' and the digits arrive as separate pieces."""
+    seen, last, pending_dot = 0, "", False
     for piece in pieces:
-        for i, ch in enumerate(piece):
-            if ch in ".!?":
+        if pending_dot:  # a '.' ended the previous piece right after a digit; decide now
+            pending_dot = False
+            if not piece[:1].isdigit():
                 seen += 1
                 if seen == n:
-                    yield piece[: i + 1]
-                    return
+                    return  # that '.' was already yielded; stop before this piece
+        for i, ch in enumerate(piece):
+            if ch not in ".!?":
+                continue
+            nxt = piece[i + 1] if i + 1 < len(piece) else ""
+            prev = piece[i - 1] if i else last
+            if ch == "." and nxt.isdigit():
+                continue  # decimal point
+            if ch == "." and not nxt and prev.isdigit():
+                pending_dot = True  # maybe a decimal; the next piece tells
+                continue
+            seen += 1
+            if seen == n:
+                yield piece[: i + 1]
+                return
+        last = piece[-1:] or last
         yield piece
+
+
+# A boundary is punctuation FOLLOWED by whitespace, so "$186.03" and "1,000" are never cut mid-number.
+_BOUNDARY = re.compile(r"[.!?;:,…](?=\s)|\n")
 
 
 def clauses(pieces: Iterator[str], first_min: int = 12, min_len: int = 30) -> Iterator[str]:
@@ -41,10 +60,13 @@ def clauses(pieces: Iterator[str], first_min: int = 12, min_len: int = 30) -> It
     buf, n = "", 0
     for piece in pieces:
         buf += piece
-        limit = first_min if n == 0 else min_len
-        if len(buf.strip()) >= limit and _CLAUSE_END.search(buf):
-            yield buf.strip()
-            buf, n = "", n + 1
+        while True:
+            limit = first_min if n == 0 else min_len
+            cut = next((m.end() for m in _BOUNDARY.finditer(buf) if len(buf[: m.end()].strip()) >= limit), None)
+            if cut is None:
+                break
+            yield buf[:cut].strip()
+            buf, n = buf[cut:], n + 1
     if buf.strip():
         yield buf.strip()
 
