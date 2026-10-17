@@ -71,6 +71,10 @@ class RavenControls(Protocol):
         """Switch the live persona; returns a short confirmation. Raises ValueError if unknown."""
         ...
 
+    def persona_brief(self) -> str:
+        """Who is speaking right now and in what voice, for the worker to write <raven> text in."""
+        ...
+
 
 @runtime_checkable
 class Worker(Protocol):

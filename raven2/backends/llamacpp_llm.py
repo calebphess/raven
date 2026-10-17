@@ -17,6 +17,7 @@ class LlamaCppLLM:
         self._temp = temperature
         self._llm = None
         self._load_lock = threading.Lock()
+        self._gen_lock = threading.Lock()  # llama.cpp contexts are not thread-safe; callers take turns
 
     def _load(self):
         with self._load_lock:
@@ -27,12 +28,14 @@ class LlamaCppLLM:
             return self._llm
 
     def stream(self, messages: list[dict], max_tokens: int = 160, temperature: float | None = None) -> Iterator[str]:
-        gen = self._load().create_chat_completion(messages=messages, max_tokens=max_tokens,
-                                                  temperature=self._temp if temperature is None else temperature, stream=True)
-        try:
-            for chunk in gen:
-                piece = chunk["choices"][0]["delta"].get("content")
-                if piece:
-                    yield piece
-        finally:
-            gen.close()
+        with self._gen_lock:
+            gen = self._load().create_chat_completion(messages=messages, max_tokens=max_tokens,
+                                                      temperature=self._temp if temperature is None else temperature,
+                                                      stream=True)
+            try:
+                for chunk in gen:
+                    piece = chunk["choices"][0]["delta"].get("content")
+                    if piece:
+                        yield piece
+            finally:
+                gen.close()

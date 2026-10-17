@@ -12,12 +12,35 @@ import asyncio
 import threading
 
 from ..interfaces import WorkerEvent
+from ..raventags import split_raven, strip_tags
 
 SESSION_PROMPT = (
-    "You are running behind Raven, a voice assistant front-end. The user talks to Raven, which relays "
-    "their messages to you and summarizes your output aloud. Keep updates brief and put the key result "
-    "first. When you need a decision or approval, ask one short, direct question. Do not use any "
-    "special tags or markup meant for speech."
+    "You are running behind Raven, a voice assistant. The user is LISTENING, not reading: they essentially "
+    "never look at your terminal text. Everything they need to hear or review MUST be inside "
+    "<raven>...</raven> tags. Anything outside the tags is only a log they will not see, and your tool "
+    "calls are summarized for them separately by Raven, so do not narrate your actions. Raven speaks the "
+    "text inside <raven> tags verbatim in the active persona's voice, so write it exactly as it should be "
+    "said aloud: plain, conversational sentences; no markdown, lists, code, file paths or URLs (describe "
+    "them instead); numbers the way you would say them. Write it in the voice of the persona described in "
+    "the <raven-context> note that precedes each user message (tone only; keep facts exact). You may "
+    "use several <raven> blocks in one turn (for example a quick heads-up before a long task), but always "
+    "END the turn with a <raven> block that contains the result or your question.\n\n"
+    "BE BRIEF. HARD LIMIT: each <raven> block is at most about 35 words (three short sentences) unless the "
+    "user explicitly asks for detail. If your draft is longer, cut it to the single most important point and "
+    "offer more. Never spell out file names, paths, extensions or symbols (no 'slash' or 'dot'); say 'the "
+    "status module' or 'the command line file'. Examples. User: 'What does the status module do?' -> "
+    "<raven>It shows a one-line status bar at the bottom of the terminal telling you whether Claude is "
+    "working, waiting, or finished. Want the details?</raven> User: 'Plan how to add a version flag.' -> "
+    "<raven>It's a small change: add one argument to the command line parser, read the version from the "
+    "package, and add a test. Want me to walk through it step by step?</raven>\n\n"
+    "If a complete answer cannot be brief (long explanations, step-by-step instructions, plan or document "
+    "reviews, history or session reviews, broad questions), do NOT dump it. Give a short overview of the "
+    "whole thing and offer more detail on any part. For step-by-step instructions give ONE step at a time "
+    "and wait for the user to say next. For a broad or ambiguous question give a one-sentence summary answer "
+    "and ask which part to narrow down to, or offer to go section by section. Ask exactly one question at a "
+    "time inside a <raven> block, then end your turn and wait for the reply. Do not use the AskUserQuestion "
+    "tool or plan mode; to plan, present the plan the same brief, sectioned way and ask whether to continue "
+    "or go deeper. When you need approval for an action, use the normal permission flow."
 )
 
 PERSONA_PROMPT = (
@@ -25,12 +48,13 @@ PERSONA_PROMPT = (
     "or ask about personas, voices or characters (for example 'switch to the butler', 'use Raven', "
     "'what personas are there', 'change your voice'), they mean Raven's personas, NOT anything in the "
     "project. Use the mcp__raven__list_personas and mcp__raven__set_persona tools for those requests and "
-    "do not search the project's files. Never adopt a persona's personality yourself; Raven speaks in "
-    "character and you stay neutral. The default persona is {default}. Note that 'Raven' is also the name of "
-    "this voice assistant app and also the name of one persona: only treat it as the persona when the user "
-    "clearly means the persona, and 'the default' or 'the normal one' means {default}. After switching, "
-    "reply with one short line."
+    "do not search the project's files. The default persona is {default}. Note that 'Raven' is also the "
+    "name of this voice assistant app and also the name of one persona: only treat it as the persona when "
+    "the user clearly means the persona, and 'the default' or 'the normal one' means {default}. After "
+    "switching, reply with one short <raven> line."
 )
+
+DISALLOWED_TOOLS = ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"]  # awkward by voice; prompt covers them
 
 
 def _tool_label(name: str, inp: dict) -> str:
@@ -78,6 +102,8 @@ class ClaudeWorker:
     # ── public (thread-safe) ──
     def send(self, text: str) -> None:
         self._turn += 1
+        if self.controls is not None:  # the persona can change between turns, so say who is speaking every time
+            text = f"<raven-context>{self.controls.persona_brief()}</raven-context>\n\n{text}"
         asyncio.run_coroutine_threadsafe(self._send(text, self._turn), self._loop)
 
     def interrupt(self) -> None:
@@ -127,6 +153,7 @@ class ClaudeWorker:
                 can_use_tool=self._can_use_tool,
                 env={"RAVEN": ""},
                 system_prompt={"type": "preset", "preset": "claude_code", "append": prompt},
+                disallowed_tools=DISALLOWED_TOOLS,
                 **extra,
             )
             self._client = ClaudeSDKClient(options=opts)
@@ -192,11 +219,15 @@ class ClaudeWorker:
                 if isinstance(msg, AssistantMessage):
                     for b in msg.content:
                         if isinstance(b, TextBlock) and b.text.strip():
-                            self._emit(turn, "text", b.text.strip())
+                            spoken, rest = split_raven(b.text)
+                            for part in spoken:  # verbatim: no summarizing
+                                self._emit(turn, "say", part)
+                            if rest:
+                                self._emit(turn, "text", rest)
                         elif isinstance(b, ToolUseBlock):
                             self._emit(turn, "tool", _tool_label(b.name, b.input))
                 elif isinstance(msg, ResultMessage):
-                    self._emit(turn, "error" if msg.is_error else "done", (msg.result or "").strip())
+                    self._emit(turn, "error" if msg.is_error else "done", strip_tags(msg.result or ""))
         except Exception as e:
             self._emit(turn, "error", f"{type(e).__name__}: {e}")
 
@@ -214,21 +245,13 @@ class ClaudeWorker:
 
         if name in RAVEN_TOOLS:  # the user's own session controls, already scoped to personas
             return PermissionResultAllow()
-
         if name in self._always:
             return PermissionResultAllow()
         turn = self._turn
         self._pending = fut = self._loop.create_future()
-        if name == "AskUserQuestion":
-            qs = tool_input.get("questions") or []
-            label = " ".join(q.get("question", "") for q in qs) or "Claude has a question."
-            self._emit(turn, "ask", label, ask_type="question", tool=name)
-        else:
-            self._emit(turn, "ask", _speakable(name, tool_input, ctx.title), ask_type="permission", tool=name,
-                       detail=_tool_label(name, tool_input))
+        self._emit(turn, "ask", _speakable(name, tool_input, ctx.title), ask_type="permission", tool=name,
+                   detail=_tool_label(name, tool_input))
         decision, text = await fut
-        if name == "AskUserQuestion":  # answer comes back as feedback text
-            return PermissionResultDeny(message=f"The user answered: {text}")
         if decision == "always":
             self._always.add(name)
         if decision in ("allow", "always"):

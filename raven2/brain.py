@@ -177,3 +177,32 @@ class Brain:
         stream = limit_sentences(self.llm.stream(messages, max_tokens=40, temperature=1.0), 2)
         for c in clauses(stream, first_min=10):
             yield c.replace('"', "")
+
+    _PROGRESS_SHOTS = [
+        (["Read: README.md", "Grep: login"], "Reading the readme and searching for login code."),
+        (["Bash: pytest -q"], "Running the tests."),
+        (["Edit: settings.py", "Edit: theme.css"], "Editing the settings and theme files."),
+        (["WebSearch: stock price"], "Searching the web."),
+    ]
+
+    def progress(self, activity: list[str]) -> Iterator[str]:
+        """One short awareness line about what the worker is doing right now. Optional by nature: if the
+        model's line isn't a plain present-progressive action, say nothing rather than guess."""
+        system = (self.persona.personality.replace("{user}", self.user_name or "the user")
+                  + " Your engineer is busy working. Give the user a quick awareness update: ONE short sentence, "
+                  "at most 10 words, present progressive, in character. Never state results or conclusions.")
+        messages = [{"role": "system", "content": system}]
+        for acts, line in self._PROGRESS_SHOTS:
+            messages += [{"role": "user", "content": "\n".join(acts)}, {"role": "assistant", "content": line}]
+        messages.append({"role": "user", "content": "\n".join(activity[-6:])})
+        out = "".join(self.llm.stream(messages, max_tokens=24, temperature=0.6)).replace('"', "").strip()
+        if (not out or len(out.split()) > 12 or self._CLAIM.search(out) or self._STATEMENT.search(out)
+                or not self._ACTION.search(out)):
+            return
+        yield out
+
+
+def verbatim_chunks(text: str) -> Iterator[str]:
+    """Split text Claude wrote for speech into sentence-sized chunks so playback starts early.
+    Nothing is rewritten: joined, the chunks are exactly the text."""
+    yield from clauses(iter([text]), first_min=14, min_len=45)

@@ -1,3 +1,4 @@
+import time
 import numpy as np
 import pytest
 
@@ -163,11 +164,11 @@ def make_with_worker(monkeypatch, tmp_path):
 def test_worker_gets_message_and_generated_ack(monkeypatch, tmp_path):
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
     llm.stream = lambda messages, max_tokens=160, temperature=None: (setattr(llm, "messages", messages), iter(["Running the tests."]))[1]
-    a.handle_text("run the tests")
+    a.handle_text("please run all the tests")
     a.wait()
-    assert w.sent == ["run the tests"]
+    assert w.sent == ["please run all the tests"]
     assert spoken == ["Running the tests."]  # model output, not a canned line
-    assert llm.messages[-1]["content"].startswith("run the tests")  # the ack model sees the request to guess step one
+    assert llm.messages[-1]["content"].startswith("please run all the tests")  # the ack model sees the request to guess step one
 
 
 def test_ack_falls_back_to_canned_line_when_llm_fails(monkeypatch, tmp_path):
@@ -326,7 +327,7 @@ def test_ack_accepts_first_step_phrases(monkeypatch, tmp_path):
     for good in ("Scanning the project files.", "Let me check that.", "Checking the git status.", "Very well, sir. Examining the tests."):
         a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
         llm.stream = lambda messages, max_tokens=160, temperature=None, _g=good: iter([_g])
-        a.handle_text("explain this project"); a.wait()
+        a.handle_text("explain what this project does"); a.wait()
         assert spoken == [good]
 
 
@@ -468,3 +469,189 @@ def test_assistant_drives_status(monkeypatch, tmp_path):
     assert "finished" in seen[-1]
     w.on_event(WorkerEvent("error", "boom"))
     assert "error" in seen[-1]
+
+
+# ── <raven> blocks: Claude speaks verbatim, Raven only acks and reports progress ──
+from raven2.raventags import split_raven, strip_tags
+
+
+def test_split_raven_blocks():
+    spoken, rest = split_raven("Thinking.\n<raven>Hello there.</raven> log <RAVEN>Second one.</RAVEN>")
+    assert spoken == ["Hello there.", "Second one."] and rest == "Thinking.\n log"
+    assert split_raven("no tags here") == ([], "no tags here")
+
+
+def test_split_raven_unclosed_tag_is_still_spoken():
+    assert split_raven("<raven>Cut off mid sentence")[0] == ["Cut off mid sentence"]
+    assert strip_tags("<raven>Hi</raven>") == "Hi"
+
+
+def test_say_event_is_spoken_verbatim_with_no_model_call_and_no_summary(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    text = "Three tests failed in the login module. Want me to look at the first one?"
+    w.on_event(WorkerEvent("tool", "Bash: pytest"))
+    w.on_event(WorkerEvent("say", text))
+    w.on_event(WorkerEvent("done", "Three tests failed. Want me to look?"))
+    a.wait()
+    assert " ".join(spoken) == text            # exactly what Claude wrote
+    assert not hasattr(llm, "messages")        # nothing was summarized by the local model
+
+
+def test_multiple_say_blocks_speak_in_order(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.on_event(WorkerEvent("say", "On it, this may take a minute."))
+    w.on_event(WorkerEvent("say", "All done. Everything passed."))
+    w.on_event(WorkerEvent("done", "x"))
+    a.wait()
+    assert " ".join(spoken) == "On it, this may take a minute. All done. Everything passed."
+
+
+def test_done_without_a_raven_block_falls_back_to_a_summary(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.on_event(WorkerEvent("done", "All 12 tests passed"))
+    a.wait()
+    assert spoken and "12 tests" in llm.messages[-1]["content"]
+
+
+def test_verbatim_flag_resets_each_turn(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.on_event(WorkerEvent("say", "First answer."))
+    w.on_event(WorkerEvent("done", "x"))
+    a.handle_text("another question"); a.wait()          # new turn
+    n = len(spoken)
+    w.on_event(WorkerEvent("done", "Plain text with no tags"))   # this turn: no say -> fallback summary
+    a.wait()
+    assert len(spoken) > n
+
+
+# ── progress ──
+def _busy(a, w, activity=("Read: README.md",)):
+    a.handle_text("do the thing"); a.wait()
+    a._activity = list(activity)
+    a._last_voice = 0.0
+
+
+def test_progress_speaks_after_the_first_gap(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Reading the readme."])
+    _busy(a, w); n = len(spoken)
+    a._progress_tick(a.progress_first - 1); a.wait()
+    assert len(spoken) == n                                # too soon
+    a._progress_tick(a.progress_first + 1); a.wait()
+    assert spoken[-1] == "Reading the readme."
+
+
+def test_progress_is_quiet_without_new_activity_or_while_waiting(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Running the tests."])
+    _busy(a, w, activity=()); n = len(spoken)
+    a._progress_tick(999); a.wait()
+    assert len(spoken) == n                                # no activity -> silence
+    a._activity = ["Bash: pytest"]; w.pending = True
+    a._progress_tick(999); a.wait()
+    assert len(spoken) == n                                # waiting on the user -> never interrupt
+    w.pending = False
+    a._progress_tick(999); a.wait()
+    assert spoken[-1] == "Running the tests."
+
+
+def test_progress_never_talks_over_speech_and_stops_when_done(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Running the tests."])
+    _busy(a, w); n = len(spoken)
+    with a._speech_lock:                                   # something is being spoken
+        a._progress_tick(999)
+    a.wait(); assert len(spoken) == n
+    w.on_event(WorkerEvent("done", "x")); a.wait()
+    a._activity = ["Bash: pytest"]; m = len(spoken)
+    a._progress_tick(999); a.wait()
+    assert len(spoken) == m                                # turn is over
+
+
+def test_progress_drops_results_and_statements(monkeypatch, tmp_path):
+    for bad in ("The tests passed.", "Everything is fine.", "Project status: good."):
+        a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+        llm.stream = lambda m, max_tokens=160, temperature=None, _b=bad: iter([_b])
+        _busy(a, w); n = len(spoken)
+        a._progress_tick(999); a.wait()
+        assert len(spoken) == n, bad
+
+
+def test_progress_labels_hide_paths():
+    from raven2.core import _short_label
+    assert _short_label("Read: /Users/someone/Development/raven/README.md") == "Read: README.md"
+
+
+# ── the worker: prompt rules, persona context, tag parsing ──
+def test_session_prompt_encodes_the_voice_and_brevity_rules():
+    from raven2.backends.claude_worker import SESSION_PROMPT, DISALLOWED_TOOLS
+    for needle in ("<raven>", "LISTENING", "verbatim", "BE BRIEF", "ONE step at a", "narrow", "ONE question",
+                   "END the turn with a <raven>"):
+        assert needle.lower() in SESSION_PROMPT.lower() or needle in SESSION_PROMPT, needle
+    assert {"AskUserQuestion", "EnterPlanMode", "ExitPlanMode"} <= set(DISALLOWED_TOOLS)
+
+
+def test_each_message_to_claude_carries_the_live_persona(monkeypatch, tmp_path):
+    from raven2.backends.claude_worker import ClaudeWorker
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    cw = ClaudeWorker()
+    sent = []
+    async def fake_send(text, turn): sent.append(text)
+    cw._send = fake_send
+    cw.controls = a
+    cw.send("what's up"); time.sleep(0.2)
+    assert sent[0].startswith("<raven-context>") and "Active persona: Dottie" in sent[0] and sent[0].endswith("what's up")
+    a.set_persona("charles")
+    cw.send("again"); time.sleep(0.2)
+    assert "Active persona: Charles" in sent[1] and "butler" in sent[1].lower()
+    cw.close()
+
+
+def test_worker_turns_raven_blocks_into_say_events():
+    import asyncio
+    from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolUseBlock
+    from raven2.backends.claude_worker import ClaudeWorker
+    msgs = [
+        AssistantMessage(content=[TextBlock("Checking.\n<raven>On it, one moment.</raven>"),
+                                  ToolUseBlock("1", "Bash", {"command": "pytest"})], model="m"),
+        AssistantMessage(content=[TextBlock("<raven>All twelve tests passed.</raven>")], model="m"),
+        ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False, num_turns=1,
+                      session_id="s", result="<raven>All twelve tests passed.</raven>"),
+    ]
+    class FakeClient:
+        async def receive_response(self):
+            for m in msgs: yield m
+    cw = ClaudeWorker()
+    events = []
+    cw.on_event = events.append
+    cw._turn = 1
+    asyncio.run_coroutine_threadsafe(cw._drain(FakeClient(), 1), cw._loop).result(5)
+    kinds = [(e.kind, e.text) for e in events]
+    assert ("say", "On it, one moment.") in kinds and ("say", "All twelve tests passed.") in kinds
+    assert ("text", "Checking.") in kinds                      # untagged prose stays log-only
+    assert kinds[-1] == ("done", "All twelve tests passed.")   # tags stripped from the final result
+    assert any(k == "tool" for k, _ in kinds)
+    cw.close()
+
+
+def test_stale_progress_is_dropped_if_claude_spoke_while_it_was_generated(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    def slow(messages, max_tokens=160, temperature=None):
+        w.on_event(WorkerEvent("say", "Here is your answer."))   # Claude answers while the line is generating
+        yield "Reading the readme."
+    llm.stream = slow
+    _busy(a, w)
+    a._progress_tick(999); a.wait()
+    assert "Reading the readme." not in spoken and "Here is your answer." in " ".join(spoken)
+
+
+def test_short_continuations_get_a_canned_ack_not_a_guess(monkeypatch, tmp_path):
+    for text in ("next", "yes please", "go on then"):
+        a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+        a.handle_text(text); a.wait()
+        assert spoken[0] in a.persona.acks and not hasattr(llm, "messages"), text
+        assert w.sent == [text]                         # still forwarded to Claude untouched
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Running the tests."])
+    a.handle_text("run all the tests now"); a.wait()
+    assert spoken == ["Running the tests."]             # real requests still get the first-step guess

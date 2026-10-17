@@ -4,12 +4,14 @@ Depends only on the ports in interfaces.py."""
 from __future__ import annotations
 
 import random
+import re
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable
 
-from . import approvals, commands, packs, personas as P
-from .brain import Brain
+from . import approvals, commands, config, packs, personas as P
+from .brain import Brain, verbatim_chunks
 from .interfaces import STT, TTS, Audio, AssetMissing, AudioOut, Worker, WorkerEvent
 
 
@@ -22,23 +24,38 @@ class Services:
     brain: Brain
 
 
+def _short_label(label: str) -> str:
+    """'Read: /a/b/c.py' -> 'Read: c.py' so the progress model isn't tempted to read out paths."""
+    return re.sub(r"(?:/[\w.\-]+)+/([\w.\-]+)", r"\1", label)[:70]
+
+
 class StartupError(RuntimeError):
     pass
 
 
 class Assistant:
     def __init__(self, svc: Services, personas: dict[str, P.Persona], log: Callable[[str], None] = print,
-                 ack_mode: str = "generated", status=None):
+                 ack_mode: str = "generated", status=None, progress: bool = True):
         self.svc, self.personas, self.log, self.ack_mode = svc, personas, log, ack_mode
         self.status = status  # optional raven2.status.Status; None = no visual indicator
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._speech_lock = threading.Lock()  # one voice at a time; worker readouts queue behind each other
+        self._speech_lock = threading.Lock()  # one voice at a time; worker speech queues behind each other
         self._speak_error = ""
         self._tools = 0
         self._persona_changed = False
         self._ask_kind = ""
+        # Worker-turn state. Raven only speaks an ack and short progress lines itself; Claude's own
+        # <raven> blocks are spoken verbatim and are the real answer.
+        self._working = False
+        self._spoke_verbatim = False
+        self._activity: list[str] = []
+        self._say_seq = 0  # bumps whenever Claude speaks, so late progress lines can tell they're stale
+        self._last_voice = 0.0
+        self._progress_count = 0
+        self._progress_thread: threading.Thread | None = None
+        self.progress_enabled, self.progress_first, self.progress_gap = progress, 6.0, 12.0
         svc.worker.on_event = self._on_worker_event
         svc.worker.controls = self  # lets the worker list/switch personas on this live session
 
@@ -78,6 +95,7 @@ class Assistant:
         if getattr(w, "background", True):
             self._st("working", True)
             self._tools, self._persona_changed = 0, False
+            self._begin_turn()
             self._start(lambda: self._ack(text))
         else:
             self._start(lambda: self.svc.brain.reply(text))
@@ -85,8 +103,10 @@ class Assistant:
     def _ack(self, text: str):
         """Generated acknowledgement; falls back to a canned persona line if the model fails."""
         spoke = False
+        # "next", "yes please", "go on": there's nothing to guess a first step for, so don't invent one.
+        generate = self.ack_mode == "generated" and len(text.split()) > 3
         try:
-            for c in (self.svc.brain.acknowledge(text) if self.ack_mode == "generated" else ()):
+            for c in (self.svc.brain.acknowledge(text) if generate else ()):
                 spoke = True
                 yield c
         except Exception as e:
@@ -108,29 +128,77 @@ class Assistant:
         self._st("working")
 
     def _on_worker_event(self, ev: WorkerEvent) -> None:
-        if ev.kind == "tool":
+        if ev.kind == "say":  # Claude's own words for the user: spoken exactly as written
+            self._spoke_verbatim = True
+            self._say_seq += 1
+            self._last_voice = time.monotonic()
+            self._start(lambda: verbatim_chunks(ev.text), cancel_current=False)
+        elif ev.kind == "tool":
             if not ev.text.startswith(("mcp__raven__", "ToolSearch")):  # session plumbing, not user work
                 self._tools += 1
+                self._activity.append(_short_label(ev.text))
                 self._st("tool")
         elif ev.kind == "ask":
             self._ask_kind = ev.data.get("ask_type", "permission")
+            self._last_voice = time.monotonic()
             self._st("waiting", "yes, always, or no?" if self._ask_kind == "permission" else "question")
             if self._ask_kind == "question":
                 self.say(ev.text)
             else:
                 self.say(f"{ev.text.rstrip('.?')}. Yes, always, or no?")
         elif ev.kind == "done":
+            self._working = False
             self._st("done")
-            if self._persona_changed and self._tools == 0:  # a switch speaks for itself; no readout
-                self._persona_changed = False
+            spoke, changed = self._spoke_verbatim, self._persona_changed
+            self._spoke_verbatim = self._persona_changed = False
+            if spoke or (changed and self._tools == 0):  # Claude already spoke / a switch spoke for itself
                 return
-            self._persona_changed = False
+            # Fallback only: Claude finished without a <raven> block, so summarize what it wrote.
             tools, result = self._tools, ev.text or "Finished, with no summary."
             self._start(lambda: self.svc.brain.relay(result, tools), cancel_current=False)
         elif ev.kind == "error":
+            self._working = False
             self._st("error", ev.text[:60])
             self.log(f"[worker error] {ev.text}")
             self.say("Something went wrong on the Claude side. Check the log.", cancel_current=False)
+
+    # ── progress: short awareness lines while the worker is busy ──
+    def _begin_turn(self) -> None:
+        self._working, self._spoke_verbatim = True, False
+        self._activity, self._progress_count = [], 0
+        self._last_voice = time.monotonic()
+        if self.progress_enabled and self._progress_thread is None:
+            self._progress_thread = threading.Thread(target=self._progress_loop, daemon=True, name="progress")
+            self._progress_thread.start()
+
+    def _progress_loop(self) -> None:
+        while True:
+            time.sleep(1.0)
+            try:
+                self._progress_tick(time.monotonic())
+            except Exception as e:
+                self.log(f"[progress] {type(e).__name__}: {e}")
+
+    def _progress_tick(self, now: float) -> None:
+        """Speak one short update if Claude has been busy and quiet for a while. Never talks over speech,
+        never while waiting on the user, and says nothing if there is no new activity."""
+        if not (self.progress_enabled and self._working) or not self._activity:
+            return
+        if self.svc.worker.has_pending() or self._speech_lock.locked():
+            return
+        gap = self.progress_first if self._progress_count == 0 else self.progress_gap
+        if now - self._last_voice < gap:
+            return
+        acts, self._activity = self._activity, []
+        self._last_voice, self._progress_count = now, self._progress_count + 1
+        self._start(lambda: self._progress_line(acts), cancel_current=False)
+
+    def _progress_line(self, acts: list[str]):
+        """Generate the line, then drop it if Claude has since spoken or finished: stale progress is noise."""
+        said = self._say_seq
+        lines = list(self.svc.brain.progress(acts))
+        if self._working and self._say_seq == said:
+            yield from lines
 
     # ── commands ──
     def _run_command(self, cmd: commands.Command) -> None:
@@ -195,6 +263,12 @@ class Assistant:
         self._persona_changed = True
         self._start(self.svc.brain.intro)  # the new persona announces itself in its own voice
         return f"Switched to {persona.name}."
+
+    def persona_brief(self) -> str:
+        user, _ = config.user_identity()
+        p = self.persona
+        return (f"Active persona: {p.name}. Write your <raven> text in this persona's voice (tone only; keep the "
+                f"facts exact): " + p.personality.replace("{user}", user or "the user"))
 
     def switch(self, persona: P.Persona) -> None:
         self.prepare(persona)
