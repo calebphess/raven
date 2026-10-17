@@ -1074,3 +1074,39 @@ def test_detach_reruns_the_same_command_in_the_background_without_the_flag():
     from raven2 import cli
     argv = ["--worker", "claude", "--cwd", "/w", "ui", "--detach"]
     assert cli.detached_argv(argv) == [_sys.executable, "-m", "raven2.cli", "--worker", "claude", "--cwd", "/w", "ui"]
+
+
+# ── switching projects in place ──
+def test_open_project_resets_the_session_but_keeps_everything_loaded(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    opened = []
+    w.open_project = lambda cwd: opened.append(cwd)
+    a.svc.brain.history += [{"role": "user", "content": "old project talk"}, {"role": "assistant", "content": "ok"}]
+    proj = tmp_path / "newproj"; proj.mkdir()
+    a._working, a._activity = True, ["Read: x"]
+    assert a.open_project(str(proj)) == str(proj)
+    assert opened == [str(proj)] and a.project_dir == str(proj)
+    assert a.svc.brain.history == [] and not a._working and a._activity == []   # clean slate for the new project
+
+
+def test_open_project_refuses_a_missing_folder_and_while_a_terminal_owns_the_session(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.open_project = lambda cwd: (_ for _ in ()).throw(AssertionError("must not be called"))
+    with pytest.raises(FileNotFoundError, match="doesn't exist"):
+        a.open_project(str(tmp_path / "nope"))
+    w.detached = True
+    with pytest.raises(RuntimeError, match="Hand Claude back"):
+        a.open_project(str(tmp_path))
+
+
+def test_worker_open_project_starts_a_fresh_session_in_the_new_folder(tmp_path):
+    from raven2.backends.claude_worker import ClaudeWorker
+    cw = ClaudeWorker(cwd=str(tmp_path))
+    cw.session_id, cw._resume_next, cw._always = "old-session", True, {"Bash"}
+    new = tmp_path / "other"; new.mkdir()
+    cw.open_project(str(new))
+    assert cw._cwd == str(new) and cw.session_id is None and cw._resume_next is False and cw._always == set()
+    assert cw.session_info() is None                     # no session until the first message in the new folder
+    with pytest.raises(FileNotFoundError):
+        cw.open_project(str(tmp_path / "missing"))
+    cw.close()

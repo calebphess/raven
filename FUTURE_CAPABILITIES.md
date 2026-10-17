@@ -13,4 +13,6 @@ Not started. Ideas and planned work for Raven V2.
 - **Distributable app**: sign with a Developer ID and notarize so it opens on other Macs without the Gatekeeper warning (it is ad-hoc signed today, fine on the Mac it was built on); universal2/Apple Silicon build; a DMG.
 - **Smaller bundle (581 MB)**: scipy is ~115 MB and is used only for audio resampling; replace it with a small numpy resampler.
 - **Menubar icon as a proper macOS template image** (monochrome, adapts to light/dark menu bars), and reflecting status.
+- **Remember the last project / Open Recent**: Raven always starts in the home folder today; File > Open Recent and an option to reopen the last project would help people who live in one repo.
+- **Voice commands for projects** ("open the raven project", "new project called x") alongside the File menu.
 

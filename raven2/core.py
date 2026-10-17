@@ -3,6 +3,7 @@ Depends only on the ports in interfaces.py."""
 
 from __future__ import annotations
 
+import os
 import queue
 import random
 import re
@@ -54,6 +55,7 @@ class Assistant:
         self._persona_changed = False
         self._ask_kind = ""
         self._manual_terminal = None
+        self.project_dir: str | None = None
         # Worker-turn state. Raven only speaks an ack and short progress lines itself; Claude's own
         # <raven> blocks are spoken verbatim and are the real answer.
         self._working = False
@@ -279,6 +281,22 @@ class Assistant:
             self._st("idle")
             raise
         return info
+
+    def open_project(self, path: str) -> str:
+        """Switch Claude to another project folder without restarting Raven (models stay loaded): a fresh
+        session in that folder, and a clean slate for the local model's conversation."""
+        if self.manual:
+            raise RuntimeError("Hand Claude back to Raven first, then switch projects.")
+        path = os.path.abspath(os.path.expanduser(path))
+        if not os.path.isdir(path):
+            raise FileNotFoundError(f"That folder doesn't exist: {path}")
+        self.barge_in()
+        self.svc.worker.open_project(path)
+        self._working, self._activity, self._spoke_verbatim, self._persona_changed = False, [], False, False
+        self.svc.brain.history.clear()
+        self._st("idle")
+        self.project_dir = path
+        return path
 
     def hand_back(self) -> None:
         """Take the session back. The hand-driven Claude process is stopped and its window closed FIRST:

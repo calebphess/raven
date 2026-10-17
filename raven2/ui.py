@@ -13,15 +13,18 @@ import math
 import os
 import re
 import signal
+import sys
 import threading
 import time
 from pathlib import Path
 
 from PySide6.QtCore import QObject, QTimer, Qt, Signal
-from PySide6.QtGui import QAction, QColor, QFont, QIcon, QPainter, QPalette, QPixmap
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPushButton,
-                               QScrollArea, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget)
+from PySide6.QtGui import QAction, QColor, QFont, QIcon, QKeySequence, QPalette, QPixmap
+from PySide6.QtWidgets import (QApplication, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit, QMenu, QMenuBar,
+                               QMessageBox, QPushButton, QScrollArea, QSystemTrayIcon, QToolButton, QVBoxLayout,
+                               QWidget)
 
+from . import macwin
 from .core import Assistant, StartupError
 from .status import Status
 
@@ -110,6 +113,7 @@ def apply_theme(app: QApplication) -> None:
     font.setPixelSize(13)
     app.setFont(font)
     app.setStyleSheet(_qss())
+    macwin.force_dark_appearance()  # dark title bars and standard dialogs, not just our own widgets
 
 
 def parse_log(line: str) -> tuple[str, str]:
@@ -140,6 +144,7 @@ class Bridge(QObject):
     ready = Signal()
     failed = Signal(str)
     notice = Signal(str)
+    project_changed = Signal(str)
 
 
 def _label(text: str, name: str, wrap: bool = True) -> QLabel:
@@ -163,10 +168,13 @@ class ChatView(QScrollArea):
         self._lay = QVBoxLayout(body)
         self._lay.setContentsMargins(20, 16, 20, 16)
         self._lay.setSpacing(6)
+        # The empty-state hint floats centered over the (empty) viewport; messages stack up from the bottom,
+        # newest next to the composer, like iMessage or Slack.
         self.hint = _label("Ask for something,\nout loud or in writing.", "hint")
+        self.hint.setParent(self.viewport())
         self.hint.setAlignment(Qt.AlignCenter)
-        self._lay.addStretch(1)
-        self._lay.addWidget(self.hint)
+        self.hint.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hint.show()
         self._lay.addStretch(1)
         self.setWidget(body)
         self.entries: list[list[str]] = []     # [who, text]
@@ -174,7 +182,7 @@ class ChatView(QScrollArea):
         self._last: tuple[str, QLabel] | None = None
 
     def _insert(self, w: QWidget) -> None:
-        self._lay.insertWidget(self._lay.count() - 1, w)
+        self._lay.addWidget(w)
 
     def add(self, who: str, text: str) -> None:
         self.hint.hide()
@@ -245,7 +253,22 @@ class ChatView(QScrollArea):
 
     def resizeEvent(self, e) -> None:
         super().resizeEvent(e)
+        self.hint.setGeometry(self.viewport().rect())
         self._apply_widths()
+
+    def clear(self) -> None:
+        """Back to the empty state (a new project starts a fresh conversation)."""
+        for i in reversed(range(self._lay.count())):
+            item = self._lay.itemAt(i)
+            w = item.widget()
+            if w is not None and w is not self.hint:
+                self._lay.takeAt(i)
+                w.setParent(None)  # gone from the window immediately, not whenever Qt gets to the deferred delete
+                w.deleteLater()
+        self.entries.clear()
+        self._labels.clear()
+        self._last = None
+        self.hint.show()
 
     def plain_text(self) -> str:
         return "\n".join(f"{w}: {t}" for w, t in self.entries)
@@ -254,11 +277,12 @@ class ChatView(QScrollArea):
 class RavenWindow(QWidget):
     hide_on_close = False
 
-    def __init__(self, asst: Assistant, bridge: Bridge, project_dir: str | None = None, on_change_folder=None):
+    def __init__(self, asst: Assistant, bridge: Bridge, project_dir: str | None = None):
         super().__init__()
         apply_theme(QApplication.instance())
-        self.asst, self.bridge, self.on_change_folder = asst, bridge, on_change_folder
+        self.asst, self.bridge = asst, bridge
         self.project_dir = project_dir
+        self._chrome_styled = False
         self.setWindowTitle("Raven")
         self.setWindowIcon(make_icon())
         self.resize(440, 740)
@@ -307,7 +331,7 @@ class RavenWindow(QWidget):
         self.folder = QToolButton()
         self.folder.setObjectName("folder")
         self.folder.setCursor(Qt.PointingHandCursor)
-        self.folder.clicked.connect(self._change_folder)
+        self.folder.clicked.connect(self.open_project)
         self._set_folder_text()
         statusrow = QHBoxLayout()
         statusrow.addWidget(pill)
@@ -336,7 +360,7 @@ class RavenWindow(QWidget):
         footer = _label("Hold ⌥ Option to talk", "footer", wrap=False)
         footer.setAlignment(Qt.AlignCenter)
 
-        lay = QVBoxLayout(self)
+        self._lay = lay = QVBoxLayout(self)
         lay.setContentsMargins(20, 16, 20, 14)
         lay.setSpacing(12)
         lay.addLayout(header)
@@ -352,7 +376,8 @@ class RavenWindow(QWidget):
         bridge.line.connect(self.on_line)
         bridge.ready.connect(self._on_ready)
         bridge.notice.connect(lambda m: self.view.add("!", m))
-        self._build_more_menu()
+        bridge.project_changed.connect(self._on_project_changed)
+        self._build_menus()
         self._set_enabled(False)
 
         self.timer = QTimer(self)
@@ -397,24 +422,62 @@ class RavenWindow(QWidget):
                 self.bridge.notice.emit(str(e))
         threading.Thread(target=run, daemon=True).start()
 
-    # ── project folder + menu ──
+    # ── projects (File menu) ──
     def _set_folder_text(self) -> None:
         d = self.project_dir
         self.folder.setText(f"{Path(d).name or d}  ›" if d else "")
-        self.folder.setToolTip(f"Claude works in {d}\nClick to change" if d else "")
+        self.folder.setToolTip(f"Claude works in {d}\nClick to open another project" if d else "")
         self.folder.setVisible(bool(d))
 
-    def _change_folder(self) -> None:
-        if self.on_change_folder:
-            self.on_change_folder(self)
-
-    def _build_more_menu(self) -> None:
+    def _build_menus(self) -> None:
+        """File > New Project… / Open Project… in the macOS menu bar (a parentless QMenuBar becomes the global
+        one), and the same two items in the ⋯ menu for people who don't look up there."""
+        self.menubar = QMenuBar()
+        file_menu = self.menubar.addMenu("File")
+        self.act_new = file_menu.addAction("New Project…", self.new_project)
+        self.act_new.setShortcut(QKeySequence.New)
+        self.act_open = file_menu.addAction("Open Project…", self.open_project)
+        self.act_open.setShortcut(QKeySequence.Open)
+        if sys.platform != "darwin":
+            self._lay.setMenuBar(self.menubar)
         m = self.more_menu
-        if self.on_change_folder:
-            m.addAction("Change project folder…", self._change_folder)
-            m.addSeparator()
+        m.addAction("New Project…", self.new_project)
+        m.addAction("Open Project…", self.open_project)
+        m.addSeparator()
         m.addAction("Hide window (keep running)", self.hide)
         m.addAction("Quit Raven", QApplication.instance().quit)
+
+    def open_project(self) -> None:
+        d = QFileDialog.getExistingDirectory(self, "Open Project", self.project_dir or str(Path.home()))
+        if d:
+            self._switch_project(d)
+
+    def new_project(self) -> None:
+        """Pick where to put a new folder and what to call it, create it, and open it."""
+        start = str(Path(self.project_dir or Path.home()) / "New Project")
+        path, _ = QFileDialog.getSaveFileName(self, "New Project", start)
+        if not path:
+            return
+        try:
+            Path(path).mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self.bridge.notice.emit(f"Couldn't create that folder: {e}")
+            return
+        self._switch_project(path)
+
+    def _switch_project(self, path: str) -> None:
+        def run():
+            try:
+                self.bridge.project_changed.emit(self.asst.open_project(path))
+            except Exception as e:
+                self.bridge.notice.emit(str(e))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_project_changed(self, path: str) -> None:
+        self.project_dir = path
+        self._set_folder_text()
+        self.view.clear()
+        self.view.add("note", f"Opened {Path(path).name or path}")
 
     # ── manual takeover ──
     def _toggle_manual(self) -> None:
@@ -476,6 +539,17 @@ class RavenWindow(QWidget):
             if self.persona.text() != label:
                 self.persona.setText(label)
 
+    def showEvent(self, e) -> None:
+        super().showEvent(e)
+        if not self._chrome_styled:
+            self._chrome_styled = True
+            QTimer.singleShot(0, self._style_chrome)
+
+    def _style_chrome(self) -> None:
+        if macwin.unify_titlebar(self, THEME["bg"]):
+            m = self._lay.contentsMargins()  # the content now runs under the title bar: clear the traffic lights
+            self._lay.setContentsMargins(m.left(), m.top() + 26, m.right(), m.bottom())
+
     def closeEvent(self, e) -> None:
         """Closing the window quits Raven, as people expect. (Hiding instead left an invisible process running
         in the launching terminal.) Use the menu's "Hide window" to keep the hotkey without a window."""
@@ -522,7 +596,7 @@ def _selftest(asst: Assistant, bridge: Bridge, text: str) -> None:
     bridge.quit_req.emit()
 
 
-def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = None, on_change_folder=None) -> int:
+def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = None) -> int:
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
     app.setApplicationName("Raven")
@@ -530,7 +604,8 @@ def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = N
     bridge = Bridge()
     asst.log = bridge.line.emit
     asst.status = asst.status or Status(enabled=False)  # state only; the window draws it
-    win = RavenWindow(asst, bridge, project_dir, on_change_folder)
+    asst.project_dir = project_dir
+    win = RavenWindow(asst, bridge, project_dir)
 
     tray = QSystemTrayIcon(make_icon(), app)
     menu = QMenu()

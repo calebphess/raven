@@ -107,6 +107,10 @@ class Worker(Protocol):
         """Take the session back; the next send resumes it."""
         ...
 
+    def open_project(self, cwd: str) -> None:
+        """Switch to another folder with a fresh session (stops anything running)."""
+        ...
+
 
 @runtime_checkable
 class AudioOut(Protocol):

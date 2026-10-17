@@ -86,7 +86,7 @@ cp -R dist/Raven.app /Applications/  # optional
 ```
 
 - **Needs:** [Claude Code](https://code.claude.com/docs/en/setup) installed (the app checks, and shows an install screen if it isn't), and the local models under `~/.raven/models` (the app lists what is missing; it does not download them yet).
-- **First launch** asks which folder Claude should work in (change it later from the `⋯` menu), then macOS asks for Microphone and Input Monitoring access (needed for the push-to-talk key, Right ⌥ Option).
+- **Launch** goes straight to your home folder (no prompt). Use **File > New Project…** or **File > Open Project…** (also in the `⋯` menu) to point Claude at another folder; that starts a fresh session there without reloading the models. The first run asks macOS for Microphone and Input Monitoring access (needed for the push-to-talk key, Right ⌥ Option).
 - **Icon:** `python scripts/make_icon.py <source.png>` regenerates `packaging/Raven.icns` and the in-app logo.
 - **Debugging:** the app writes `~/.raven/logs/app.log` (startup stages, library diagnostics, crashes). `RAVEN_NO_PTT=1` skips push-to-talk setup; `RAVEN_SELFTEST="message"` sends one message, logs the result and quits.
 - **Smoke test the built app safely:** `python scripts/smoke_app.py 60` (add `--missing-claude`, or `--selftest "message"`). It launches headless in a sandboxed Raven home with a Finder-like environment, caps the processes the app may create and kills its process group on timeout. Always test frozen apps this way: a frozen app that re-launches itself is a fork bomb.

@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QFrame, QLabel
+from PySide6.QtWidgets import QApplication, QFileDialog, QFrame, QLabel
 
 from raven2 import terminal as T
 from raven2.status import Status
@@ -221,15 +221,94 @@ def test_persona_menu_switches_the_live_persona(ui):
     assert [x.text() for x in win.persona_menu.actions() if x.isChecked()] == ["Charles"]
 
 
-def test_change_folder_menu_item_only_when_supported(ui, qapp):
-    _, win, a, w, opened, bridge = ui
-    assert "Change project folder…" not in [x.text() for x in win.more_menu.actions()]
-    calls = []
-    win2 = RavenWindow(a, Bridge(), "/work/proj", on_change_folder=lambda wnd: calls.append(wnd))
-    assert "Change project folder…" in [x.text() for x in win2.more_menu.actions()]
-    win2.folder.click()
-    assert calls == [win2]
-    win2.timer.stop()
+def test_file_menu_has_new_and_open_project(ui):
+    qapp, win, a, w, opened, bridge = ui
+    menus = {m.title(): m for m in [act.menu() for act in win.menubar.actions()]}
+    assert list(menus) == ["File"]
+    items = [x.text() for x in menus["File"].actions()]
+    assert items == ["New Project…", "Open Project…"]
+    from PySide6.QtGui import QKeySequence
+    assert win.act_new.shortcut() == QKeySequence(QKeySequence.New) and win.act_open.shortcut() == QKeySequence(QKeySequence.Open)
+    assert {"New Project…", "Open Project…"} <= {x.text() for x in win.more_menu.actions()}   # also in the ⋯ menu
+
+
+def test_open_project_switches_in_place_and_starts_a_fresh_chat(ui, monkeypatch, tmp_path):
+    qapp, win, a, w, opened, bridge = ui
+    proj = tmp_path / "my-app"; proj.mkdir()
+    switched = []
+    w.open_project = lambda cwd: switched.append(cwd)
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *x, **k: str(proj)))
+    bridge.line.emit("you: hello from the old project"); qapp.processEvents()
+    assert len(win.view.entries) == 1
+    win.act_open.trigger()
+    assert pump(qapp, lambda: win.project_dir == str(proj))
+    assert switched == [str(proj)] and a.project_dir == str(proj)
+    assert win.view.entries == [["note", "Opened my-app"]]                    # the old conversation is gone
+    assert win.folder.text().startswith("my-app") and str(proj) in win.folder.toolTip()
+    assert win.view.hint.isHidden()
+
+
+def test_open_project_cancel_changes_nothing(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    w.open_project = lambda cwd: (_ for _ in ()).throw(AssertionError("must not switch"))
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *x, **k: ""))
+    win.act_open.trigger(); qapp.processEvents()
+    assert win.project_dir == "/work/proj"
+
+
+def test_new_project_creates_the_folder_and_opens_it(ui, monkeypatch, tmp_path):
+    qapp, win, a, w, opened, bridge = ui
+    target = tmp_path / "brand new" / "cool-idea"                              # nested: parents get created too
+    switched = []
+    w.open_project = lambda cwd: switched.append(cwd)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *x, **k: (str(target), "")))
+    win.act_new.trigger()
+    assert pump(qapp, lambda: win.project_dir == str(target))
+    assert target.is_dir() and switched == [str(target)]
+    assert win.view.entries == [["note", "Opened cool-idea"]]
+
+
+def test_new_project_cancel_creates_nothing(ui, monkeypatch, tmp_path):
+    qapp, win, a, w, opened, bridge = ui
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", staticmethod(lambda *x, **k: ("", "")))
+    win.act_new.trigger(); qapp.processEvents()
+    assert win.project_dir == "/work/proj" and list(tmp_path.iterdir()) == []
+
+
+def test_switching_projects_is_refused_while_a_terminal_owns_the_session(ui, monkeypatch, tmp_path):
+    qapp, win, a, w, opened, bridge = ui
+    w.detached = True
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *x, **k: str(tmp_path)))
+    win.act_open.trigger()
+    assert pump(qapp, lambda: any("Hand Claude back" in t for _, t in win.view.entries))
+    assert win.project_dir == "/work/proj"
+
+
+def test_clicking_the_folder_chip_opens_the_project_picker(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    asked = []
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *x, **k: asked.append(1) or ""))
+    win.folder.click()
+    assert asked == [1]
+
+
+def test_title_bar_styling_is_a_safe_noop_off_the_cocoa_platform(ui):
+    """The headless test platform has no native macOS window: styling must quietly do nothing, not raise."""
+    from raven2 import macwin
+    qapp, win, a, w, opened, bridge = ui
+    assert qapp.platformName() == "offscreen"
+    assert macwin.force_dark_appearance() is False and macwin.unify_titlebar(win, THEME["bg"]) is False
+    win.show(); qapp.processEvents(); qapp.processEvents()                       # showEvent -> _style_chrome path
+    assert win._chrome_styled and win._lay.contentsMargins().top() == 16          # no extra room reserved when unstyled
+
+
+def test_chat_clear_returns_to_the_empty_state(ui):
+    qapp, win, a, w, opened, bridge = ui
+    for line in ("you: hi", "Dottie: hello", "[worker error] boom"):
+        bridge.line.emit(line)
+    qapp.processEvents()
+    win.view.clear()
+    assert win.view.entries == [] and win.view.hint.isVisibleTo(win.view) and bubbles(win) == []
 
 
 def test_closing_the_window_quits_the_app(ui, monkeypatch):

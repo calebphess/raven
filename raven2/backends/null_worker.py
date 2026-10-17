@@ -35,3 +35,6 @@ class NullWorker:
 
     def attach(self) -> None:
         pass
+
+    def open_project(self, cwd: str) -> None:
+        pass

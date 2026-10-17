@@ -1,7 +1,7 @@
 """Entry point of the packaged Raven.app (also runnable in development: `python -m raven2.gui_main`).
 
-Order: set up the environment -> check Claude Code is installed -> check the local models -> pick the project
-folder Claude works in -> run the UI. Each failed check is a window, not a log line."""
+Order: set up the environment -> check Claude Code is installed -> check the local models -> start Claude in
+the home folder -> run the UI (File > New Project / Open Project move it elsewhere). Each failed check is a window, not a log line."""
 
 from __future__ import annotations
 
@@ -101,40 +101,6 @@ def ensure_claude(app) -> preflight.ClaudeInfo | None:
             return None
 
 
-def choose_folder(parent=None, start: str | None = None) -> str | None:
-    from PySide6.QtWidgets import QFileDialog
-
-    d = QFileDialog.getExistingDirectory(parent, "Choose the folder Claude should work in", start or str(Path.home()))
-    return d or None
-
-
-def ensure_project_dir(app) -> str | None:
-    saved = config.read_state().get("project_dir")
-    if saved and os.path.isdir(saved):
-        return saved
-    d = choose_folder()
-    if d:
-        config.update_state(project_dir=d)
-    return d
-
-
-def change_folder(win) -> None:
-    """Pick a new project folder and restart: a Claude session belongs to one folder."""
-    import subprocess
-
-    from PySide6.QtWidgets import QApplication
-
-    d = choose_folder(win, win.project_dir)
-    if not d or d == win.project_dir:
-        return
-    config.update_state(project_dir=d)
-    args = [] if getattr(sys, "frozen", False) else sys.argv
-    env = {k: v for k, v in os.environ.items() if k != "RAVEN_APP_PID"}  # the new copy is a deliberate launch
-    subprocess.Popen([sys.executable, *args], env=env, start_new_session=True, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    QApplication.instance().quit()
-
-
 def main() -> int:
     setup_environment()
     setup_logging()
@@ -158,14 +124,12 @@ def main() -> int:
         log.warning("models missing: %s", missing)
         models_missing_dialog(missing, str(config.MODELS_DIR)).exec()
         return 1
-    project = ensure_project_dir(app)
-    if project is None:
-        return 0
+    project = str(Path.home())  # always start in the home folder; File > New/Open Project switches
     log.info("project folder: %s", project)
     log.info("diagnostics: %s", diagnostics())
     request_input_monitoring()
     asst = builder.build(worker="claude", cwd=project, claude_path=info.path)
-    return run_ui(asst, project_dir=project, on_change_folder=change_folder)
+    return run_ui(asst, project_dir=project)
 
 
 if __name__ == "__main__":

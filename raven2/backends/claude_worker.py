@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 
 from ..interfaces import WorkerEvent
@@ -84,8 +85,6 @@ RAVEN_TOOLS = ("mcp__raven__list_personas", "mcp__raven__set_persona")
 class ClaudeWorker:
     def __init__(self, cwd: str = ".", model: str | None = None, permission_mode: str | None = None,
                  cli_path: str | None = None, **_):
-        import os
-
         self._cwd = os.path.abspath(os.path.expanduser(cwd))
         if not os.path.isdir(self._cwd):  # fail at startup, not after the user has already spoken
             raise FileNotFoundError(f"working directory does not exist: {self._cwd}")
@@ -131,6 +130,18 @@ class ClaudeWorker:
 
     def attach(self) -> None:
         self.detached = False  # the next send() reconnects with resume=<session_id>
+
+    def open_project(self, cwd: str) -> None:
+        """Point the worker at another folder: stop whatever is running, drop the old session and start fresh
+        in `cwd` on the next message. (A Claude session belongs to one folder.)"""
+        cwd = os.path.abspath(os.path.expanduser(cwd))
+        if not os.path.isdir(cwd):
+            raise FileNotFoundError(f"that folder doesn't exist: {cwd}")
+        self._turn += 1  # drop any in-flight output
+        asyncio.run_coroutine_threadsafe(self._release(), self._loop).result(timeout=20)
+        self._cwd, self.session_id = cwd, None
+        self._resume_next, self.detached = False, False
+        self._always.clear()  # "always allow" was granted for the old project
 
     async def _release(self):
         await self._interrupt()

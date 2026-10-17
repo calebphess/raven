@@ -79,23 +79,8 @@ def test_installed_claude_never_shows_a_dialog(qapp, monkeypatch):
     assert gui_main.ensure_claude(qapp).version == "9.9"
 
 
-def test_project_folder_is_remembered(qapp, monkeypatch, tmp_path):
-    monkeypatch.setattr(config, "HOME", tmp_path / "home")
-    monkeypatch.setattr(config, "STATE_FILE", tmp_path / "home" / "state.json")
-    proj = tmp_path / "proj"; proj.mkdir()
-    monkeypatch.setattr(gui_main, "choose_folder", lambda *a, **k: str(proj))
-    assert gui_main.ensure_project_dir(qapp) == str(proj)                  # first launch: asks, saves
-    monkeypatch.setattr(gui_main, "choose_folder", lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked again")))
-    assert gui_main.ensure_project_dir(qapp) == str(proj)                  # next launch: no prompt
 
 
-def test_a_deleted_project_folder_asks_again_and_cancel_quits(qapp, monkeypatch, tmp_path):
-    monkeypatch.setattr(config, "HOME", tmp_path)
-    monkeypatch.setattr(config, "STATE_FILE", tmp_path / "state.json")
-    config.update_state(project_dir=str(tmp_path / "gone"))
-    asked = []
-    monkeypatch.setattr(gui_main, "choose_folder", lambda *a, **k: asked.append(1))   # user cancels
-    assert gui_main.ensure_project_dir(qapp) is None and asked == [1]
 
 
 def test_state_updates_merge_instead_of_overwriting(tmp_path, monkeypatch):
@@ -137,18 +122,19 @@ def test_main_stops_with_a_dialog_when_models_are_missing(monkeypatch, qapp):
     assert gui_main.main() == 1 and shown == [["language model (x)"]] and built == []
 
 
-def test_main_passes_the_found_claude_to_the_worker(monkeypatch, qapp, tmp_path):
+def test_main_starts_in_the_home_folder_without_asking_and_passes_the_found_claude(monkeypatch, qapp, tmp_path):
     seen = {}
     monkeypatch.setattr(gui_main, "setup_environment", lambda: None)
     monkeypatch.setattr(gui_main, "request_input_monitoring", lambda: None)
     monkeypatch.setattr(gui_main, "ensure_claude", lambda app: pf.ClaudeInfo("/odd/place/claude", "9"))
     monkeypatch.setattr(pf, "missing_models", lambda *a: [])
-    monkeypatch.setattr(gui_main, "ensure_project_dir", lambda app: str(tmp_path))
     monkeypatch.setattr("raven2.app.build", lambda **k: seen.update(k) or "assistant")
     monkeypatch.setattr("raven2.ui.run_ui", lambda asst, **k: (seen.update(ui=(asst, k)), 0)[1])
     assert gui_main.main() == 0
-    assert seen["claude_path"] == "/odd/place/claude" and seen["cwd"] == str(tmp_path) and seen["worker"] == "claude"
-    assert seen["ui"][0] == "assistant" and seen["ui"][1]["project_dir"] == str(tmp_path)
+    from pathlib import Path
+    home = str(Path.home())
+    assert seen["claude_path"] == "/odd/place/claude" and seen["cwd"] == home and seen["worker"] == "claude"
+    assert seen["ui"][0] == "assistant" and seen["ui"][1]["project_dir"] == home
 
 
 def test_dialog_buttons_are_wide_enough_for_their_labels(qapp):
@@ -189,18 +175,6 @@ def test_nested_launch_exits_without_starting_the_app_and_logs_why(tmp_path):
     assert "starting Raven" not in log                           # it never reached the real startup
 
 
-def test_change_folder_relaunch_clears_the_guard(monkeypatch, qapp, tmp_path):
-    import subprocess
-    seen = {}
-    monkeypatch.setattr(config, "HOME", tmp_path); monkeypatch.setattr(config, "STATE_FILE", tmp_path / "s.json")
-    monkeypatch.setattr(gui_main, "choose_folder", lambda *a, **k: str(tmp_path / "new"))
-    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: seen.update(cmd=cmd, env=k["env"]))
-    monkeypatch.setattr(QApplication, "quit", staticmethod(lambda: seen.update(quit=True)))
-    monkeypatch.setenv("RAVEN_APP_PID", "1234")
-    win = type("W", (), {"project_dir": "/old"})()
-    gui_main.change_folder(win)
-    assert "RAVEN_APP_PID" not in seen["env"] and seen["quit"] is True
-    assert config.read_state()["project_dir"] == str(tmp_path / "new")
 
 
 def test_diagnostics_report_the_native_pieces(qapp):
@@ -231,3 +205,18 @@ def test_selftest_sends_one_message_logs_events_and_quits(qapp, monkeypatch, tmp
     text = "\n".join(records)
     assert "selftest: sending 'what is two plus two please'" in text and "selftest event: say 'Four.'" in text
     assert "selftest: finished=True" in text and quits == [1] and w.sent == ["what is two plus two please"]
+
+
+def test_launch_never_asks_for_a_folder(monkeypatch, qapp):
+    """Opening Raven goes straight to the home folder: no folder dialog on launch."""
+    from PySide6.QtWidgets import QFileDialog
+    for fn in ("getExistingDirectory", "getSaveFileName", "getOpenFileName"):
+        monkeypatch.setattr(QFileDialog, fn, staticmethod(lambda *a, **k: (_ for _ in ()).throw(AssertionError("asked for a folder"))))
+    monkeypatch.setattr(gui_main, "setup_environment", lambda: None)
+    monkeypatch.setattr(gui_main, "request_input_monitoring", lambda: None)
+    monkeypatch.setattr(gui_main, "ensure_claude", lambda app: pf.ClaudeInfo("/bin/claude", "9"))
+    monkeypatch.setattr(pf, "missing_models", lambda *a: [])
+    monkeypatch.setattr("raven2.app.build", lambda **k: "assistant")
+    monkeypatch.setattr("raven2.ui.run_ui", lambda asst, **k: 0)
+    assert gui_main.main() == 0
+    assert not hasattr(gui_main, "ensure_project_dir") and not hasattr(gui_main, "change_folder")
