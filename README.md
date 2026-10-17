@@ -74,3 +74,20 @@ ls .venv/lib/python*/site-packages/llama_cpp/lib | grep -c metal   # should prin
 - `raven2 --worker claude --cwd <real dir> run` (push-to-talk) or `chat` (typed). `--cwd` must exist.
 
 **Building persona packs.** `python scripts/build_packs.py` writes `dist/packs/<id>.zip` and `index.json` (upload both to your pack host and set `RAVEN_PACKS_URL`). It needs each persona's Piper voice under `~/.raven/models`, downloaded from Hugging Face. On some networks `huggingface.co` times out during the TLS handshake while other sites work (we saw this until NordVPN was on); the app itself never needs Hugging Face at runtime. Downloads can also truncate silently: the build script loads and speaks each voice before zipping it, so a bad file is skipped rather than shipped.
+
+## Raven.app (macOS)
+
+Build a double-clickable app from the project venv (see the Intel notes above for installing the dependencies):
+
+```
+pip install -e ".[v2,ui,app]"
+python scripts/build_app.py          # -> dist/Raven.app (ad-hoc signed, ~580 MB)
+cp -R dist/Raven.app /Applications/  # optional
+```
+
+- **Needs:** [Claude Code](https://code.claude.com/docs/en/setup) installed (the app checks, and shows an install screen if it isn't), and the local models under `~/.raven/models` (the app lists what is missing; it does not download them yet).
+- **First launch** asks which folder Claude should work in (change it later from the `⋯` menu), then macOS asks for Microphone and Input Monitoring access (needed for the push-to-talk key, Right ⌥ Option).
+- **Icon:** `python scripts/make_icon.py <source.png>` regenerates `packaging/Raven.icns` and the in-app logo.
+- **Debugging:** the app writes `~/.raven/logs/app.log` (startup stages, library diagnostics, crashes). `RAVEN_NO_PTT=1` skips push-to-talk setup; `RAVEN_SELFTEST="message"` sends one message, logs the result and quits.
+- **Smoke test the built app safely:** `python scripts/smoke_app.py 60` (add `--missing-claude`, or `--selftest "message"`). It launches headless in a sandboxed Raven home with a Finder-like environment, caps the processes the app may create and kills its process group on timeout. Always test frozen apps this way: a frozen app that re-launches itself is a fork bomb.
+

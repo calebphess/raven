@@ -149,3 +149,85 @@ def test_main_passes_the_found_claude_to_the_worker(monkeypatch, qapp, tmp_path)
     assert gui_main.main() == 0
     assert seen["claude_path"] == "/odd/place/claude" and seen["cwd"] == str(tmp_path) and seen["worker"] == "claude"
     assert seen["ui"][0] == "assistant" and seen["ui"][1]["project_dir"] == str(tmp_path)
+
+
+def test_dialog_buttons_are_wide_enough_for_their_labels(qapp):
+    """Regression: 'Open install guide' and 'Copy command' were clipped to 'pen install gui' / 'opy comman'."""
+    d = dialogs.claude_missing_dialog()
+    d.show(); qapp.processEvents()
+    for b in d.buttons.values():
+        assert b.width() >= b.fontMetrics().horizontalAdvance(b.text()) + 30, b.text()
+
+
+# ── the packaged app must never relaunch itself recursively ──
+def _load_entry():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("raven_entry", os.path.join(os.path.dirname(__file__), "..", "packaging", "entry.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)           # defines helpers only: the launch code sits under __main__
+    return mod
+
+
+def test_entry_detects_a_launch_by_an_already_running_copy(monkeypatch):
+    entry = _load_entry()
+    monkeypatch.delenv("RAVEN_APP_PID", raising=False)
+    assert entry._nested_launch() is False                       # a normal launch (Finder, Dock, terminal)
+    monkeypatch.setenv("RAVEN_APP_PID", "99999")
+    assert entry._nested_launch() is True                        # spawned by a running Raven -> must not start
+    monkeypatch.setenv("RAVEN_APP_PID", str(os.getpid()))
+    assert entry._nested_launch() is False                       # the app itself
+
+
+def test_nested_launch_exits_without_starting_the_app_and_logs_why(tmp_path):
+    import subprocess, sys
+    env = {**os.environ, "RAVEN_APP_PID": "99999", "RAVEN_HOME": str(tmp_path), "QT_QPA_PLATFORM": "offscreen"}
+    entry = os.path.join(os.path.dirname(__file__), "..", "packaging", "entry.py")
+    r = subprocess.run([sys.executable, entry], env=env, capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0 and "Traceback" not in r.stderr
+    log = (tmp_path / "logs" / "app.log").read_text()
+    assert "refused nested launch" in log and "parent_app_pid=99999" in log
+    assert "starting Raven" not in log                           # it never reached the real startup
+
+
+def test_change_folder_relaunch_clears_the_guard(monkeypatch, qapp, tmp_path):
+    import subprocess
+    seen = {}
+    monkeypatch.setattr(config, "HOME", tmp_path); monkeypatch.setattr(config, "STATE_FILE", tmp_path / "s.json")
+    monkeypatch.setattr(gui_main, "choose_folder", lambda *a, **k: str(tmp_path / "new"))
+    monkeypatch.setattr(subprocess, "Popen", lambda cmd, **k: seen.update(cmd=cmd, env=k["env"]))
+    monkeypatch.setattr(QApplication, "quit", staticmethod(lambda: seen.update(quit=True)))
+    monkeypatch.setenv("RAVEN_APP_PID", "1234")
+    win = type("W", (), {"project_dir": "/old"})()
+    gui_main.change_folder(win)
+    assert "RAVEN_APP_PID" not in seen["env"] and seen["quit"] is True
+    assert config.read_state()["project_dir"] == str(tmp_path / "new")
+
+
+def test_diagnostics_report_the_native_pieces(qapp):
+    d = gui_main.diagnostics()
+    assert set(d) == {"audio_devices", "pynput", "input_monitoring_granted"}
+    assert d["pynput"] == "ok"
+
+
+def test_selftest_sends_one_message_logs_events_and_quits(qapp, monkeypatch, tmp_path):
+    from test_v2 import make_with_worker
+    from raven2.backends.null_worker import NullWorker
+    from raven2.interfaces import WorkerEvent
+    from raven2.ui import Bridge, _selftest
+    import logging
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    bridge, quits, records = Bridge(), [], []
+    bridge.quit_req.connect(lambda: quits.append(1))
+    class Capture(logging.Handler):
+        def emit(self, r): records.append(r.getMessage())
+    h = Capture(); logging.getLogger("raven").addHandler(h); logging.getLogger("raven").setLevel(logging.INFO)
+    orig_send = w.send
+    w.send = lambda text: (orig_send(text), w.on_event(WorkerEvent("say", "Four.")), w.on_event(WorkerEvent("done", "Four.")))
+    try:
+        _selftest(a, bridge, "what is two plus two please")
+        qapp.processEvents()
+    finally:
+        logging.getLogger("raven").removeHandler(h)
+    text = "\n".join(records)
+    assert "selftest: sending 'what is two plus two please'" in text and "selftest event: say 'Four.'" in text
+    assert "selftest: finished=True" in text and quits == [1] and w.sent == ["what is two plus two please"]

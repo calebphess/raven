@@ -5,11 +5,29 @@ folder Claude works in -> run the UI. Each failed check is a window, not a log l
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 from pathlib import Path
 
 from . import config, preflight
+
+log = logging.getLogger("raven")
+
+
+def setup_logging() -> Path:
+    """A Finder-launched app has no terminal, so write what it does (and any crash) to ~/.raven/logs/app.log."""
+    path = config.HOME / "logs" / "app.log"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    logging.basicConfig(filename=str(path), level=logging.INFO, force=True,
+                        format="%(asctime)s %(levelname)s %(message)s")
+
+    def crash(kind, value, tb):
+        log.critical("uncaught exception", exc_info=(kind, value, tb))
+        sys.__excepthook__(kind, value, tb)
+
+    sys.excepthook = crash
+    return path
 
 
 def setup_environment() -> None:
@@ -31,6 +49,8 @@ def setup_environment() -> None:
 
 def request_input_monitoring() -> None:
     """Ask macOS for Input Monitoring (needed for the global push-to-talk key). Safe to call repeatedly."""
+    if os.environ.get("RAVEN_NO_PTT"):
+        return
     try:
         import Quartz
 
@@ -40,6 +60,31 @@ def request_input_monitoring() -> None:
         pass  # not macOS, or pyobjc missing: the key listener will simply not receive events
 
 
+def diagnostics() -> dict:
+    """Whether the bundled native pieces load. Logged at startup: in a frozen app, a missing library is the
+    most likely failure and there is no terminal to show it."""
+    out: dict = {}
+    try:
+        import sounddevice
+
+        out["audio_devices"] = len(sounddevice.query_devices())
+    except Exception as e:
+        out["audio_devices"] = f"FAILED {type(e).__name__}: {e}"
+    try:
+        import pynput.keyboard  # noqa: F401
+
+        out["pynput"] = "ok"
+    except Exception as e:
+        out["pynput"] = f"FAILED {type(e).__name__}: {e}"
+    try:
+        import Quartz
+
+        out["input_monitoring_granted"] = bool(Quartz.CGPreflightListenEventAccess())
+    except Exception as e:
+        out["input_monitoring_granted"] = f"unknown ({type(e).__name__})"
+    return out
+
+
 def ensure_claude(app) -> preflight.ClaudeInfo | None:
     """Loop until Claude Code is found or the user quits."""
     from .dialogs import claude_missing_dialog
@@ -47,7 +92,9 @@ def ensure_claude(app) -> preflight.ClaudeInfo | None:
     while True:
         info = preflight.find_claude()
         if info:
+            log.info("claude code found: %s (%s)", info.path, info.version)
             return info
+        log.warning("claude code not found; showing the install dialog")
         dlg = claude_missing_dialog()
         dlg.exec()
         if dlg.result_key != "again":
@@ -73,7 +120,8 @@ def ensure_project_dir(app) -> str | None:
 
 def change_folder(win) -> None:
     """Pick a new project folder and restart: a Claude session belongs to one folder."""
-    from PySide6.QtCore import QProcess
+    import subprocess
+
     from PySide6.QtWidgets import QApplication
 
     d = choose_folder(win, win.project_dir)
@@ -81,12 +129,16 @@ def change_folder(win) -> None:
         return
     config.update_state(project_dir=d)
     args = [] if getattr(sys, "frozen", False) else sys.argv
-    QProcess.startDetached(sys.executable, args)
+    env = {k: v for k, v in os.environ.items() if k != "RAVEN_APP_PID"}  # the new copy is a deliberate launch
+    subprocess.Popen([sys.executable, *args], env=env, start_new_session=True, stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     QApplication.instance().quit()
 
 
 def main() -> int:
     setup_environment()
+    setup_logging()
+    log.info("starting Raven (frozen=%s) python=%s", getattr(sys, "frozen", False), sys.version.split()[0])
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication(sys.argv)
@@ -103,11 +155,14 @@ def main() -> int:
         return 0
     missing = preflight.missing_models()
     if missing:
+        log.warning("models missing: %s", missing)
         models_missing_dialog(missing, str(config.MODELS_DIR)).exec()
         return 1
     project = ensure_project_dir(app)
     if project is None:
         return 0
+    log.info("project folder: %s", project)
+    log.info("diagnostics: %s", diagnostics())
     request_input_monitoring()
     asst = builder.build(worker="claude", cwd=project, claude_path=info.path)
     return run_ui(asst, project_dir=project, on_change_folder=change_folder)

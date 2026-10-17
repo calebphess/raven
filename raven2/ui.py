@@ -10,6 +10,7 @@ with push-to-talk and no window."""
 from __future__ import annotations
 
 import math
+import os
 import re
 import signal
 import threading
@@ -134,6 +135,7 @@ def make_icon() -> QIcon:
 
 
 class Bridge(QObject):
+    quit_req = Signal()
     line = Signal(str)
     ready = Signal()
     failed = Signal(str)
@@ -497,6 +499,29 @@ def shutdown(asst: Assistant) -> None:
         pass
 
 
+def _selftest(asst: Assistant, bridge: Bridge, text: str) -> None:
+    """RAVEN_SELFTEST="message": exercise the whole worker path from a packaged app and log what happened."""
+    import logging
+
+    lg = logging.getLogger("raven")
+    done = threading.Event()
+    orig = asst._on_worker_event
+
+    def tap(ev):
+        lg.info("selftest event: %s %r", ev.kind, ev.text[:120])
+        orig(ev)
+        if ev.kind in ("done", "error"):
+            done.set()
+
+    asst.svc.worker.on_event = tap
+    lg.info("selftest: sending %r", text)
+    asst.handle_text(text)
+    lg.info("selftest: finished=%s", done.wait(150))
+    asst.wait()
+    lg.info("selftest: complete")
+    bridge.quit_req.emit()
+
+
 def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = None, on_change_folder=None) -> int:
     app = QApplication.instance() or QApplication([])
     app.setQuitOnLastWindowClosed(False)
@@ -531,14 +556,23 @@ def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = N
     pulse.timeout.connect(lambda: None)
 
     def boot():
+        import logging
+
+        lg = logging.getLogger("raven")
         try:
+            lg.info("loading voice and models")
             asst.prepare()   # loads the voice, downloading its pack first if needed
             asst.startup()
         except Exception as e:  # StartupError, a failed pack download, a missing file... all end in one dialog
+            lg.exception("startup failed")
             bridge.failed.emit(str(e) or type(e).__name__)
             return
+        lg.info("ready")
         bridge.ready.emit()
-        if enable_ptt:
+        if os.environ.get("RAVEN_SELFTEST"):  # diagnostic: send one message, log the outcome, quit
+            threading.Thread(target=_selftest, args=(asst, bridge, os.environ["RAVEN_SELFTEST"]), daemon=True).start()
+            return
+        if enable_ptt and not os.environ.get("RAVEN_NO_PTT"):
             from . import ptt
 
             ptt.run(asst)  # global hotkey; works with the window closed
@@ -548,5 +582,6 @@ def run_ui(asst: Assistant, enable_ptt: bool = True, project_dir: str | None = N
         app.exit(1)
 
     bridge.failed.connect(fail)
+    bridge.quit_req.connect(app.quit)
     threading.Thread(target=boot, daemon=True, name="boot").start()
     return app.exec()

@@ -31,7 +31,7 @@ class SetupDialog(QDialog):
         apply_theme(QGuiApplication.instance())
         self.setWindowTitle("Raven")
         self.setWindowIcon(make_icon())
-        self.setMinimumWidth(460)
+        self.setMinimumWidth(580)
         self.result_key = "quit"
         self.buttons: dict[str, QPushButton] = {}
         logo = QLabel()
@@ -52,9 +52,11 @@ class SetupDialog(QDialog):
             bl.addWidget(c)
             lay.addWidget(box)
         row = QHBoxLayout()
+        row.setSpacing(10)
         row.addStretch(1)
         for key, label, primary in buttons:
             b = QPushButton(label)
+            b.setMinimumWidth(b.fontMetrics().horizontalAdvance(label) + 52)  # never clip a label
             if primary:
                 b.setObjectName("primary")
                 b.setDefault(True)

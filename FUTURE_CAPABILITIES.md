@@ -9,3 +9,8 @@ Not started. Ideas and planned work for Raven V2.
 - Reading shell commands aloud sensibly (Claude currently spells symbols: "python three space dash m space venv"); part of the speakable-text pass above.
 - Remote worker (Claude on a home machine) and Android shell.
 - Make `--worker claude` the default; remove V1 hooks/installer once V2 is the daily driver.
+- **First-run model download inside the app**: Raven.app does not bundle the models (language model ~0.8 GB, speech model ~0.15 GB, voices ~60 MB each); on launch it checks for them and says what is missing. It should download them itself with a progress screen, from a host you control (Hugging Face is blocked on some networks).
+- **Distributable app**: sign with a Developer ID and notarize so it opens on other Macs without the Gatekeeper warning (it is ad-hoc signed today, fine on the Mac it was built on); universal2/Apple Silicon build; a DMG.
+- **Smaller bundle (581 MB)**: scipy is ~115 MB and is used only for audio resampling; replace it with a small numpy resampler.
+- **Menubar icon as a proper macOS template image** (monochrome, adapts to light/dark menu bars), and reflecting status.
+
