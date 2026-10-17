@@ -367,3 +367,138 @@ def test_composer_is_tall_enough_to_keep_its_pill_corners(ui):
 def test_app_logo_asset_ships_with_the_package():
     from raven2.ui import ASSET_DIR, app_pixmap
     assert (ASSET_DIR / "icon.png").exists() and not app_pixmap(30).isNull()
+
+
+# ── dragging the window by its header (the native title bar is hidden) ──
+class FakeHandle:
+    def __init__(self, ok=True): self.moves, self.ok = 0, ok
+    def startSystemMove(self): self.moves += 1; return self.ok
+
+
+def press(win, x, y, button=Qt.LeftButton):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+    ev = QMouseEvent(QEvent.MouseButtonPress, QPointF(x, y), QPointF(x, y), button, button, Qt.NoModifier)
+    win.mousePressEvent(ev)
+    return ev
+
+
+def test_pressing_the_empty_header_starts_a_window_move(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    h = FakeHandle()
+    monkeypatch.setattr(win, "windowHandle", lambda: h)
+    zone = win._drag_zone_bottom()
+    assert press(win, 200, 8).isAccepted() and press(win, 200, 14).isAccepted()      # the traffic-light strip
+    assert press(win, 200, zone - 2).isAccepted()                                     # the bottom of the header row
+    assert h.moves == 3
+
+
+def test_the_conversation_and_composer_never_start_a_window_move(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    h = FakeHandle()
+    monkeypatch.setattr(win, "windowHandle", lambda: h)
+    zone = win._drag_zone_bottom()
+    for y in (zone + 20, win.height() // 2, win.height() - 30):                       # chat area, composer, footer
+        press(win, 200, y)
+    assert h.moves == 0                                                               # text selection etc. unaffected
+
+
+def mouse(win, kind, x, y, gx, gy, button=Qt.LeftButton, buttons=Qt.LeftButton):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+    k = {"press": QEvent.MouseButtonPress, "move": QEvent.MouseMove, "release": QEvent.MouseButtonRelease}[kind]
+    ev = QMouseEvent(k, QPointF(x, y), QPointF(gx, gy), button, buttons if kind != "release" else Qt.NoButton, Qt.NoModifier)
+    {"press": win.mousePressEvent, "move": win.mouseMoveEvent, "release": win.mouseReleaseEvent}[kind](ev)
+    return ev
+
+
+def test_only_the_left_button_drags(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    h = FakeHandle(ok=True)
+    monkeypatch.setattr(win, "windowHandle", lambda: h)
+    press(win, 200, 10, Qt.RightButton)
+    assert h.moves == 0 and win._drag_from is None
+
+
+def test_when_the_platform_declines_the_window_follows_the_mouse_itself(ui, monkeypatch):
+    """startSystemMove() returned False on macOS in testing, so the fallback must actually move the window."""
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    monkeypatch.setattr(win, "windowHandle", lambda: FakeHandle(ok=False))
+    start = win.pos()
+    assert mouse(win, "press", 200, 10, 1000, 500).isAccepted() and win._drag_from is not None
+    mouse(win, "move", 230, 40, 1030, 530)                       # drag 30 right, 30 down
+    assert win.pos() == start + type(start)(30, 30)
+    mouse(win, "move", 160, 0, 960, 490)                         # and back past the start: relative to the press, not cumulative
+    assert win.pos() == start + type(start)(-40, -10)
+    mouse(win, "release", 160, 0, 960, 490)
+    assert win._drag_from is None
+    mouse(win, "move", 300, 300, 1100, 800)                      # after release, moving the mouse does nothing
+    assert win.pos() == start + type(start)(-40, -10)
+
+
+def test_the_native_move_is_preferred_when_it_works(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    h = FakeHandle(ok=True)
+    monkeypatch.setattr(win, "windowHandle", lambda: h)
+    press(win, 200, 10)
+    assert h.moves == 1 and win._drag_from is None               # no manual tracking when the OS handles it
+
+
+def test_moving_the_mouse_in_the_chat_never_moves_the_window(ui, monkeypatch):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    monkeypatch.setattr(win, "windowHandle", lambda: FakeHandle(ok=False))
+    start = win.pos()
+    zone = win._drag_zone_bottom()
+    mouse(win, "press", 200, zone + 80, 1000, 600)               # pressed below the header: not a drag
+    mouse(win, "move", 260, zone + 120, 1060, 640)
+    assert win.pos() == start and win._drag_from is None
+
+
+def test_the_persona_pill_and_menu_button_still_receive_their_own_clicks(ui):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    zone = win._drag_zone_bottom()
+    assert win.persona.geometry().bottom() < zone and win.persona.isEnabled()          # inside the strip, but a button
+    assert win.persona.menu() is win.persona_menu                                      # (buttons consume their presses)
+
+
+def test_drag_moves_the_native_window_when_it_can_and_y_axis_is_flipped(ui, monkeypatch):
+    """On macOS the window is moved natively (AppKit's y axis points up, so dragging down lowers y)."""
+    from raven2 import macwin
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    monkeypatch.setattr(win, "windowHandle", lambda: FakeHandle(ok=False))
+    monkeypatch.setattr(macwin, "window_origin", lambda w_: (100.0, 200.0))
+    placed = []
+    monkeypatch.setattr(macwin, "set_window_origin", lambda w_, x, y: placed.append((x, y)) or True)
+    start = win.pos()
+    mouse(win, "press", 200, 10, 1000, 500)
+    mouse(win, "move", 230, 40, 1030, 530)                       # 30 right, 30 down
+    mouse(win, "move", 200, 5, 1000, 495)                        # 5 up from the press point
+    assert placed == [(130.0, 170.0), (100.0, 205.0)]            # x follows, y is inverted, measured from the press
+    assert win.pos() == start                                    # Qt's own (inaccurate) move() was not used
+
+
+def test_drag_falls_back_to_qt_move_if_the_native_move_fails(ui, monkeypatch):
+    from raven2 import macwin
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    monkeypatch.setattr(win, "windowHandle", lambda: FakeHandle(ok=False))
+    monkeypatch.setattr(macwin, "window_origin", lambda w_: (100.0, 200.0))
+    monkeypatch.setattr(macwin, "set_window_origin", lambda w_, x, y: False)
+    start = win.pos()
+    mouse(win, "press", 200, 10, 1000, 500)
+    mouse(win, "move", 220, 30, 1020, 520)
+    assert win.pos() == start + type(start)(20, 20)
+
+
+def test_native_window_helpers_are_safe_noops_off_cocoa(ui):
+    from raven2 import macwin
+    qapp, win, a, w, opened, bridge = ui
+    assert macwin.window_origin(win) is None and macwin.set_window_origin(win, 1, 2) is False

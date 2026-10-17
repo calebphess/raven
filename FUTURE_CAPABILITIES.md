@@ -15,4 +15,13 @@ Not started. Ideas and planned work for Raven V2.
 - **Menubar icon as a proper macOS template image** (monochrome, adapts to light/dark menu bars), and reflecting status.
 - **Remember the last project / Open Recent**: Raven always starts in the home folder today; File > Open Recent and an option to reopen the last project would help people who live in one repo.
 - **Voice commands for projects** ("open the raven project", "new project called x") alongside the File menu.
+- **Settings page** (longer term): one place in the app to
+  - choose the models: speech-to-text, the language model and the voice engine (the `intel-cpu` / `apple-silicon` profiles today, or your own), with download progress and disk use;
+  - manage personas: switch, install from a pack, remove, preview a voice;
+  - connect Claude Code, including **remote sessions** (Claude running on a home machine through the remote worker and host agent: pairing token, Tailscale/SSH link, connection status), plus sign-in status and the project folder default.
+- **Persona packs anyone can build and host** (longer term): turn the current pack mechanism (`persona.toml` + voice files in a zip, `index.json` with hashes, `scripts/build_packs.py`, `RAVEN_PACKS_URL`) into a documented, versioned format that you or others can author, publish and install from any static host. Includes:
+  - a dedicated **`docs/PERSONAS.md`** README for creating personas: the `persona.toml` fields (name, aliases, greeting, acks, personality, `[voice]` model/length/noise, `[voice.effects]` pitch/ring/comb), how to pick and audition a Piper voice, writing a personality that works for a small model, packaging, hosting on S3/GitHub releases, and testing;
+  - `raven2 personas validate` / `raven2 personas build` so authors can check a pack (it loads, speaks, hashes match, no personal data) before publishing;
+  - support for several pack sources at once (your own host plus community ones) and a browsable index in the settings page;
+  - pack metadata for voice licenses and attribution, and optional signatures so installs can be trusted.
 

@@ -283,6 +283,7 @@ class RavenWindow(QWidget):
         self.asst, self.bridge = asst, bridge
         self.project_dir = project_dir
         self._chrome_styled = False
+        self._drag_from = None  # (mouse, Qt window pos, native origin) while following the mouse ourselves
         self.setWindowTitle("Raven")
         self.setWindowIcon(make_icon())
         self.resize(440, 740)
@@ -538,6 +539,40 @@ class RavenWindow(QWidget):
             label = f"{active.name}  ▾"
             if self.persona.text() != label:
                 self.persona.setText(label)
+
+    def _drag_zone_bottom(self) -> int:
+        """Bottom edge of the strip you can grab to move the window: the traffic-light area plus the header row."""
+        return max(self.persona.geometry().bottom(), self.folder.geometry().top()) + 10
+
+    def mousePressEvent(self, e) -> None:
+        """With the native title bar hidden, Qt's content covers the drag strip, so moving the window is ours to
+        do. Ask the platform to start the move; if it declines, follow the mouse ourselves. Buttons, the persona
+        pill and the menus consume their own clicks; only empty header space reaches here."""
+        if e.button() == Qt.LeftButton and e.position().y() <= self._drag_zone_bottom():
+            handle = self.windowHandle()
+            if handle is not None and handle.startSystemMove():
+                e.accept()
+                return
+            self._drag_from = (e.globalPosition().toPoint(), self.pos(), macwin.window_origin(self))
+            e.accept()
+            return
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e) -> None:
+        if self._drag_from is not None and e.buttons() & Qt.LeftButton:
+            start, origin, native = self._drag_from
+            d = e.globalPosition().toPoint() - start
+            # On macOS move the native window itself (Qt's move() is off by the old title-bar height); the screen's
+            # y axis points up there, hence "minus". Elsewhere use Qt's own move().
+            if not (native and macwin.set_window_origin(self, native[0] + d.x(), native[1] - d.y())):
+                self.move(origin + d)
+            e.accept()
+            return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e) -> None:
+        self._drag_from = None
+        super().mouseReleaseEvent(e)
 
     def showEvent(self, e) -> None:
         super().showEvent(e)
