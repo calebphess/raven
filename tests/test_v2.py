@@ -162,11 +162,12 @@ def make_with_worker(monkeypatch, tmp_path):
 
 def test_worker_gets_message_and_generated_ack(monkeypatch, tmp_path):
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    llm.stream = lambda messages, max_tokens=160, temperature=None: (setattr(llm, "messages", messages), iter(["Running the tests."]))[1]
     a.handle_text("run the tests")
     a.wait()
     assert w.sent == ["run the tests"]
-    assert spoken == ["Hello there, friend. All good."]  # LLM output, not canned
-    assert "run the tests" not in str(llm.messages)  # the model never sees the request, so it can't answer it
+    assert spoken == ["Running the tests."]  # model output, not a canned line
+    assert llm.messages[-1]["content"].startswith("run the tests")  # the ack model sees the request to guess step one
 
 
 def test_ack_falls_back_to_canned_line_when_llm_fails(monkeypatch, tmp_path):
@@ -252,7 +253,8 @@ def test_approval_callback_fails_closed():
 
 
 def test_ack_that_answers_or_claims_results_is_dropped(monkeypatch, tmp_path):
-    for bad in ("There are 12 files in the src folder.", "Repository uploaded.", "The tests passed."):
+    for bad in ("There are 12 files in the src folder.", "Repository uploaded.", "The tests passed.", "Task is confirmed.", "This is a data processing project.",
+                "Engineering is on track.", "Project status: Currently building."):
         a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
         llm.stream = lambda messages, max_tokens=160, temperature=None, _b=bad: iter([_b])
         a.handle_text("how many files are there")
@@ -318,3 +320,11 @@ def test_startup_without_intro_is_silent(monkeypatch, tmp_path):
 def test_limit_sentences_truncates_mid_piece():
     from raven2.brain import limit_sentences
     assert "".join(limit_sentences(iter(["Up.", " Ready? Yes", ". More."]), 2)) == "Up. Ready?"
+
+
+def test_ack_accepts_first_step_phrases(monkeypatch, tmp_path):
+    for good in ("Scanning the project files.", "Let me check that.", "Checking the git status.", "Very well, sir. Examining the tests."):
+        a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+        llm.stream = lambda messages, max_tokens=160, temperature=None, _g=good: iter([_g])
+        a.handle_text("explain this project"); a.wait()
+        assert spoken == [good]

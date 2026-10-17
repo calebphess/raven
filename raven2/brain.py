@@ -91,32 +91,46 @@ class Brain:
             if spoken:
                 self.history.append({"role": "assistant", "content": " ".join(spoken)})
 
+    # Words that assert an outcome. The ack may guess the first step ("Scanning the project"), never a result.
     _CLAIM = re.compile(
         r"\d|\b(there (is|are)|exists?|contains?|uploaded|pushed|committed|created|deleted|found|"
-        r"done|finished|complete[d]?|fixed|passed|failed|unchanged|updated|repository|unclear|awaited|"
-        r"please|status|defined)\b", re.I)
+        r"done|finished|complete[d]?|fixed|passed|failed|unchanged|updated)\b", re.I)
+    # An ack must START with the action ("Scanning...", "Let me...", "On it"), optionally after a short
+    # in-character lead-in ("Very well, sir. Checking..."), and must not be a statement ("X is ...").
+    _ACTION = re.compile(r"^(?:[\w' ]{1,25}[,.!]\s*){0,2}(?:[a-z]+ing\b|let me\b|i'?ll\b|i will\b|on it\b)", re.I)
+    _STATEMENT = re.compile(r"\b(is|are|was|were|it's|this|that's)\b", re.I)
 
-    def _ack_messages(self) -> list[dict]:
+    # Restating the format right after the request keeps a 1B model from answering it.
+    _ACK_SUFFIX = "\n(Reply only with the first step you are taking now, e.g. \"Scanning the files.\")"
+
+    _ACK_SHOTS = [
+        ("Explain what this project is about.", "Scanning the project files."),
+        ("Why is the build failing?", "Checking the build output."),
+        ("Commit this to git.", "Looking at the git status."),
+        ("Add a dark mode to the settings page.", "Finding the settings code."),
+        ("What's the weather in Denver?", "Looking that up."),
+    ]
+
+    def _ack_messages(self, text: str = "Explain what this project is about.") -> list[dict]:
+        """Prompt for the instant acknowledgement: guess the *first step* of the task, in character.
+        The guess may be wrong; the request itself goes to the worker untouched."""
         system = (self.persona.personality.replace("{user}", self.user_name or "the user")
-                  + " The user has just handed you a task and you are starting on it. Say one very short "
-                  "acknowledgement, at most 6 words, no quotation marks. You do not know what the task is.")
-        replies = self.persona.acks or ["On it."]
+                  + " The user has handed a task to your engineer, who is starting now. Say the likely FIRST "
+                  "STEP as an action in progress, at most 6 words, in character. Never state a result, "
+                  "an answer, or a number.")
         messages = [{"role": "system", "content": system}]
-        for r in replies[:3]:  # the persona's own lines teach voice
-            messages += [{"role": "user", "content": "Acknowledge."}, {"role": "assistant", "content": r}]
-        messages.append({"role": "user", "content": "Acknowledge."})
+        for q, a in self._ACK_SHOTS:
+            messages += [{"role": "user", "content": q + self._ACK_SUFFIX}, {"role": "assistant", "content": a}]
+        messages.append({"role": "user", "content": text + self._ACK_SUFFIX})
         return messages
 
     def acknowledge(self, text: str) -> Iterator[str]:
-        """Instant, in-voice acknowledgement while the worker starts.
-
-        The model is deliberately NOT shown the request. Shown it, a 1B model tends to answer
-        ("Nine files are in the src folder") — spoken misinformation before the worker has done anything.
-        Without it, it can only emit a short in-character 'on it'. The reply is still validated, and
-        yielding nothing makes the caller fall back to a canned persona line."""
-        messages = self._ack_messages()
-        out = "".join(self.llm.stream(messages, max_tokens=14, temperature=1.0)).replace('"', "").strip()
-        if not out or len(out.split()) > 8 or self._CLAIM.search(out):
+        """Instant, in-voice acknowledgement that assumes the first step ("Scanning the project").
+        A reply that states a result or doesn't sound like work starting is dropped (caller falls back
+        to a canned persona line); a *wrong guess* is fine, since Claude acts on the raw request."""
+        out = "".join(self.llm.stream(self._ack_messages(text), max_tokens=18, temperature=0.7)).replace('"', "").strip()
+        if not out or len(out.split()) > 9 or self._CLAIM.search(out) or not self._ACTION.search(out) \
+                or self._STATEMENT.search(out):
             return
         self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": out}]
         yield out
