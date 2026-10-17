@@ -566,8 +566,9 @@ def test_progress_never_talks_over_speech_and_stops_when_done(monkeypatch, tmp_p
     a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
     llm.stream = lambda m, max_tokens=160, temperature=None: iter(["Running the tests."])
     _busy(a, w); n = len(spoken)
-    with a._speech_lock:                                   # something is being spoken
-        a._progress_tick(999)
+    a._pending = 1                                         # something is being spoken
+    a._progress_tick(999)
+    a._pending = 0
     a.wait(); assert len(spoken) == n
     w.on_event(WorkerEvent("done", "x")); a.wait()
     a._activity = ["Bash: pytest"]; m = len(spoken)
@@ -778,3 +779,199 @@ def test_a_very_long_run_with_no_sentence_end_falls_back_to_a_comma_cut():
     chunks = list(clauses(iter([long])))
     assert len(chunks) >= 2 and " ".join(chunks) == long
     assert all(len(c) <= 170 for c in chunks)
+
+
+# ── ordering: Raven's ack is always first and quick; Claude waits its turn ──
+import threading
+
+
+class InstantWorker(FakeWorker):
+    """Claude that answers (or asks) the instant it receives a message, before the ack could be generated."""
+    def __init__(self, events):
+        super().__init__(); self.events = events
+
+    def send(self, text):
+        self.sent.append(text)
+        for ev in self.events:
+            self.pending = self.pending or ev.kind == "ask"   # a permission is outstanding once it is asked
+            self.on_event(ev)
+
+
+def make_instant(monkeypatch, tmp_path, events, ack_text="Checking the files.", ack_delay=0.0):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    iw = InstantWorker(events)
+    iw.on_event = a._on_worker_event
+    a.svc.worker = iw
+    iw.controls = a
+    def stream(messages, max_tokens=160, temperature=None):
+        time.sleep(ack_delay)
+        yield ack_text
+    llm.stream = stream
+    return a, iw, llm, spoken
+
+
+def test_fast_claude_answer_still_speaks_after_the_ack(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_instant(monkeypatch, tmp_path, [WorkerEvent("say", "The answer is forty two."),
+                                                              WorkerEvent("done", "x")], ack_delay=0.4)
+    a.handle_text("what is the answer to everything please"); a.wait()
+    assert spoken == ["Checking the files.", "The answer is forty two."]   # ack first, even though Claude was faster
+
+
+def test_fast_permission_request_does_not_cancel_the_ack(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_instant(monkeypatch, tmp_path,
+                                     [WorkerEvent("ask", "Claude wants to search the web", {"ask_type": "permission"})],
+                                     ack_delay=0.3)
+    a.handle_text("find the stock price for me today"); a.wait()
+    assert spoken[0] == "Checking the files." and spoken[1].startswith("Claude wants to search the web")
+
+
+def test_fast_persona_switch_does_not_cancel_the_ack(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_instant(monkeypatch, tmp_path, [], ack_delay=0.3)
+    a.handle_text("make it the butler voice please now")
+    time.sleep(0.05)
+    a.set_persona("charles")        # Claude's tool call lands while the ack is still being generated
+    a.wait()
+    assert spoken[0] == "Checking the files." and a.persona.id == "charles" and len(spoken) >= 2
+
+
+def test_slow_model_gets_a_canned_ack_within_the_deadline(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_instant(monkeypatch, tmp_path, [WorkerEvent("say", "Here you go.")], ack_delay=3.0)
+    a.ack_deadline = 0.2
+    t0 = time.time()
+    a.handle_text("explain what this project does please"); a.wait()
+    assert spoken[0] in a.persona.acks and spoken[-1] == "Here you go."
+    assert time.time() - t0 < 2.0                                          # didn't wait for the slow model
+
+
+def test_failing_model_falls_back_to_canned_ack(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_instant(monkeypatch, tmp_path, [WorkerEvent("say", "Done here.")])
+    def boom(messages, max_tokens=160, temperature=None):
+        raise RuntimeError("model died"); yield
+    llm.stream = boom
+    a.handle_text("explain what this project does please"); a.wait()
+    assert spoken[0] in a.persona.acks and spoken[-1] == "Done here."
+
+
+def test_barge_in_drops_queued_claude_speech(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    gate = threading.Event()
+    real = a.svc.tts.synthesize
+    def synth(text, voice):
+        if text == "first": gate.wait(2)          # the first utterance is "playing"
+        return real(text, voice)
+    a.svc.tts.synthesize = synth
+    a.say("first", cancel_current=True)
+    a.say("second", cancel_current=False); a.say("third", cancel_current=False)
+    time.sleep(0.05)
+    a.barge_in()                                  # the user presses the key
+    gate.set(); a.wait()
+    assert "second" not in spoken and "third" not in spoken and a._pending == 0
+    assert a.svc.out.cancelled >= 1               # and the audio already playing is cut off immediately
+
+
+def test_cancel_current_replaces_queued_speech(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    gate = threading.Event()
+    real = a.svc.tts.synthesize
+    def slow(text, voice):
+        if text == "first": gate.wait(2)
+        return real(text, voice)
+    a.svc.tts.synthesize = slow
+    a.say("first"); a.say("queued", cancel_current=False)
+    time.sleep(0.05)
+    a.say("replacement")            # default cancel_current=True: supersedes first and queued
+    gate.set(); a.wait()
+    assert "queued" not in spoken and spoken[-1] == "replacement"
+
+
+# ── small talk goes to Raven, not Claude ──
+CHIT = ["how are you", "How are you doing today?", "hey Dottie, how are you", "good job", "Thanks!",
+        "thank you so much", "you're doing great", "that was awesome", "who are you", "hi", "good morning Raven",
+        "I love you", "what's up", "nice work", "you are the best", "are you there"]
+TASKS = ["thanks, can you run the tests", "how's it going with the build", "good job on the tests, now deploy",
+         "what's up with the failing test", "how are the tests doing", "hello can you check the logs",
+         "you did great, commit it", "who are the contributors to this project", "nice work, now fix the bug in login",
+         "run the tests", "what does this project do"]
+
+
+@pytest.mark.parametrize("text", CHIT)
+def test_conversational_talk_is_recognized(text):
+    assert commands.match(text, P.load_all()).kind == "chat"
+
+
+@pytest.mark.parametrize("text", TASKS)
+def test_anything_with_a_task_is_not_small_talk(text):
+    c = commands.match(text, P.load_all())
+    assert c is None or c.kind != "chat"
+
+
+def test_small_talk_gets_an_instant_local_reply_and_never_reaches_claude(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a.handle_text("hey how are you doing today"); a.wait()
+    assert w.sent == []                                          # not forwarded
+    assert spoken == ["Hello there, friend."]                    # one short sentence, from the local model
+    assert "how are you doing today" in str(llm.messages) and "small talk" in llm.messages[0]["content"]
+
+
+def test_small_talk_does_not_interrupt_a_running_task(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a.handle_text("please refactor the whole login module now"); a.wait()
+    a.status = Status(stream=io.StringIO(), enabled=True)
+    sent = list(w.sent)
+    a.handle_text("good job"); a.wait()
+    assert w.sent == sent and a._working                         # Claude is untouched and still working
+
+
+def test_yes_thanks_still_answers_a_pending_permission(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    w.pending = True
+    w.on_event(WorkerEvent("ask", "Claude wants to edit x", {"ask_type": "permission"}))
+    a.handle_text("thanks"); a.wait()                            # small talk while a permission is open
+    assert w.answers == [] and w.pending                         # not misread as a decision
+    a.handle_text("yes thanks"); a.wait()
+    assert w.answers == [("allow", "")]
+
+
+# ── never talk over the user ──
+def test_speech_waits_while_the_user_is_talking_then_resumes_on_a_stray_tap(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a._st("listen", "listening")                                 # key held down
+    a.say("Claude's answer", cancel_current=False)
+    time.sleep(0.3)
+    assert spoken == []                                          # held back; not talking over the user
+    a._st("listen", "")                                          # accidental tap: released with no message
+    a.wait()
+    assert spoken == ["Claude's answer"]
+
+
+def test_speech_held_while_listening_is_dropped_when_the_message_arrives(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    a._st("listen", "listening")
+    a.say("stale answer", cancel_current=False)
+    time.sleep(0.1)
+    a._st("listen", "transcribing")
+    a.handle_text("what is two plus two exactly")                # the new message supersedes it
+    a._st("listen", ""); a.wait()
+    assert "stale answer" not in spoken
+
+
+def test_a_broken_utterance_never_silences_later_speech(monkeypatch, tmp_path):
+    a, w, llm, spoken = make_with_worker(monkeypatch, tmp_path)
+    logs = []
+    a.log = logs.append
+    def explode(): raise RuntimeError("bug while creating the utterance")
+    a._start(explode, cancel_current=False)
+    def explode_midway():
+        yield "fine so far."
+        raise ValueError("bug midway")
+    a._start(explode_midway, cancel_current=False)
+    a.say("still talking", cancel_current=False)
+    a.wait()
+    assert "still talking" in spoken and "fine so far." in spoken       # the speaker thread survived both
+    assert any("bug while creating" in l for l in logs) and any("bug midway" in l for l in logs)
+    assert a._pending == 0
+
+
+def test_chat_is_a_method_of_brain():
+    from raven2.brain import Brain
+    assert callable(getattr(Brain, "chat")) and callable(getattr(Brain, "progress")) and callable(getattr(Brain, "intro"))

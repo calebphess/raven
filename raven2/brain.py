@@ -167,7 +167,8 @@ class Brain:
         """Load the model and prefill the persona prompt so the first real reply isn't a cold start."""
         messages = [{"role": "system", "content": system_prompt(self.persona, self.user_name)},
                     {"role": "user", "content": "Hi."}]
-        for msgs in (messages, self._ack_messages()):  # chat prompt and ack prompt, both on the hot path
+        # every prompt that sits on the path to first words: plain reply, small talk, and the instant ack
+        for msgs in (messages, self._chat_messages("Hi."), self._ack_messages()):
             for _ in self.llm.stream(msgs, max_tokens=1):
                 pass
 
@@ -206,6 +207,28 @@ class Brain:
                 or not self._ACTION.search(out)):
             return
         yield out
+
+    _CHAT_RULE = (" This is casual small talk with the user, not a task. Reply in ONE short sentence (at most 14 "
+                  "words) that directly answers or acknowledges what they said, in character. Do not talk about "
+                  "systems, missions, status reports or tasks unless they asked.")
+
+    def _chat_messages(self, text: str) -> list[dict]:
+        system = system_prompt(self.persona, self.user_name) + self._CHAT_RULE
+        # No fixed example answers: the model copies them word for word instead of answering in character.
+        return [{"role": "system", "content": system}, *self.history[-4:], {"role": "user", "content": text}]
+
+    def chat(self, text: str) -> Iterator[str]:
+        """Instant in-character reply to small talk aimed at Raven (greetings, how-are-you, thanks, compliments).
+        Short on purpose: the first words must come quickly and a long answer to 'how are you' is wrong anyway."""
+        messages = self._chat_messages(text)
+        spoken: list[str] = []
+        try:
+            for c in clauses(limit_sentences(self.llm.stream(messages, max_tokens=36, temperature=0.8), 1)):
+                spoken.append(c)
+                yield c
+        finally:
+            self.history += [{"role": "user", "content": text}, {"role": "assistant", "content": " ".join(spoken)}]
+            self.history = self.history[-self.max_history * 2:]
 
 
 def verbatim_chunks(text: str) -> Iterator[str]:

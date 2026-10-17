@@ -3,6 +3,7 @@ Depends only on the ports in interfaces.py."""
 
 from __future__ import annotations
 
+import queue
 import random
 import re
 import threading
@@ -38,10 +39,16 @@ class Assistant:
                  ack_mode: str = "generated", status=None, progress: bool = True):
         self.svc, self.personas, self.log, self.ack_mode = svc, personas, log, ack_mode
         self.status = status  # optional raven2.status.Status; None = no visual indicator
-        self._cancel = threading.Event()
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._speech_lock = threading.Lock()  # one voice at a time; worker speech queues behind each other
+        # Speech is one FIFO queue drained by one thread, so utterances play strictly in the order they were
+        # queued: Raven's instant ack always comes first and Claude's words wait behind it. `_epoch` is the
+        # cancel mechanism: bumping it drops everything queued and stops the utterance in progress.
+        self._q: queue.Queue = queue.Queue()
+        self._epoch = 0
+        self._pending = 0
+        self._listening = False
+        self._cond = threading.Condition()
+        self.ack_deadline = 2.0  # seconds the model gets to produce an ack before the canned line is used
+        threading.Thread(target=self._speaker_loop, daemon=True, name="speaker").start()
         self._speak_error = ""
         self._tools = 0
         self._persona_changed = False
@@ -65,12 +72,15 @@ class Assistant:
 
     # ── input ──
     def _st(self, name: str, *args) -> None:
+        if name == "listen":  # the user is speaking (or being transcribed): Raven must not talk over them
+            self._listening = bool(args and args[0])
         if self.status is not None:
             getattr(self.status, name)(*args)
 
     def barge_in(self) -> None:
-        """User started talking/typing: silence everything immediately."""
-        self._cancel.set()
+        """User started talking/typing: silence everything immediately, queued speech included."""
+        with self._cond:
+            self._epoch += 1
         self.svc.out.cancel()
 
     def handle_audio(self, samples, sample_rate: int = 16_000) -> None:
@@ -86,35 +96,55 @@ class Assistant:
         self.log(f"you: {text}")
         self.barge_in()
         cmd = commands.match(text, self.personas)
-        if cmd:
+        if cmd and cmd.kind == "chat":
+            # Small talk aimed at Raven ("how are you", "good job"): answer locally, right now. It is not
+            # forwarded, so it neither bothers Claude nor interrupts a task in progress. If a permission is
+            # outstanding, fall through so "yes, thanks" is still read as an answer.
+            if not self.svc.worker.has_pending():
+                return self._start(lambda: self.svc.brain.chat(text))
+        elif cmd:
             return self._run_command(cmd)
         w = self.svc.worker
         if getattr(w, "detached", False):  # a terminal owns the session; never write to it from here
             return self.say("Claude is open in the terminal. Tell me to hand it back when you're done.")
         if w.has_pending():
             return self._answer_pending(text)
-        w.send(text)  # always forwarded (interrupting any running turn); the worker decides what to do
         if getattr(w, "background", True):
             self._st("working", True)
             self._tools, self._persona_changed = 0, False
             self._begin_turn()
-            self._start(lambda: self._ack(text))
+            self._start(lambda: self._ack(text))  # queued BEFORE the send, so nothing from Claude can precede it
+            w.send(text)  # always forwarded (interrupting any running turn); the worker decides what to do
         else:
+            w.send(text)
             self._start(lambda: self.svc.brain.reply(text))
 
     def _ack(self, text: str):
-        """Generated acknowledgement; falls back to a canned persona line if the model fails."""
-        spoke = False
+        """The first thing spoken for a request. It must be quick: the model gets `ack_deadline` seconds, and
+        if it is slow, fails, or says something unusable, the persona's canned line is spoken instead."""
+        canned = random.choice(self.persona.acks or ["On it."])
         # "next", "yes please", "go on": there's nothing to guess a first step for, so don't invent one.
-        generate = self.ack_mode == "generated" and len(text.split()) > 3
+        if self.ack_mode != "generated" or len(text.split()) <= 3:
+            yield canned
+            return
+        box: queue.Queue = queue.Queue()
+
+        def work():
+            try:
+                box.put(list(self.svc.brain.acknowledge(text)))
+            except Exception as e:
+                box.put(e)
+
+        threading.Thread(target=work, daemon=True, name="ack").start()
         try:
-            for c in (self.svc.brain.acknowledge(text) if generate else ()):
-                spoke = True
-                yield c
-        except Exception as e:
-            self.log(f"[ack fallback] {type(e).__name__}: {e}")
-        if not spoke:
-            yield random.choice(self.persona.acks or ["On it."])
+            out = box.get(timeout=self.ack_deadline)
+        except queue.Empty:
+            self.log(f"[ack fallback] model took over {self.ack_deadline:.0f}s")
+            yield canned
+            return
+        if isinstance(out, Exception):
+            self.log(f"[ack fallback] {type(out).__name__}: {out}")
+        yield from (out if (out and not isinstance(out, Exception)) else [canned])
 
     # ── worker events ──
     def _answer_pending(self, text: str) -> None:
@@ -145,9 +175,9 @@ class Assistant:
             self._last_voice = time.monotonic()
             self._st("waiting", "yes, always, or no?" if self._ask_kind == "permission" else "question")
             if self._ask_kind == "question":
-                self.say(ev.text)
-            else:
-                self.say(f"{ev.text.rstrip('.?')}. Yes, always, or no?")
+                self.say(ev.text, cancel_current=False)
+            else:  # queued behind whatever is being said (e.g. the ack), never cutting it off
+                self.say(f"{ev.text.rstrip('.?')}. Yes, always, or no?", cancel_current=False)
         elif ev.kind == "done":
             self._working = False
             self._st("done")
@@ -186,7 +216,7 @@ class Assistant:
         never while waiting on the user, and says nothing if there is no new activity."""
         if not (self.progress_enabled and self._working) or not self._activity:
             return
-        if self.svc.worker.has_pending() or self._speech_lock.locked():
+        if self.svc.worker.has_pending() or self._pending > 0:
             return
         gap = self.progress_first if self._progress_count == 0 else self.progress_gap
         if now - self._last_voice < gap:
@@ -277,6 +307,12 @@ class Assistant:
             if self._speak_error:
                 raise StartupError(self._speak_error)
 
+    def _rewarm(self) -> None:
+        try:
+            self.svc.brain.warm()
+        except Exception as e:
+            self.log(f"[rewarm] {type(e).__name__}: {e}")
+
     def _warm(self) -> None:
         import numpy as np
 
@@ -304,7 +340,7 @@ class Assistant:
         except (AssetMissing, packs.PackError) as e:
             raise ValueError(f"Couldn't load {persona.name}: {e}") from e
         self._persona_changed = True
-        self._start(self.svc.brain.intro)  # the new persona announces itself in its own voice
+        self._start(self.svc.brain.intro, cancel_current=False)  # the new persona announces itself, after the ack
         return f"Switched to {persona.name}."
 
     def persona_brief(self) -> str:
@@ -316,6 +352,8 @@ class Assistant:
     def switch(self, persona: P.Persona) -> None:
         self.prepare(persona)
         self.svc.brain.set_persona(persona)
+        # A new persona means new prompts; re-read them now so the first reply isn't a cold, slow one.
+        threading.Thread(target=self._rewarm, daemon=True, name="rewarm").start()
         P.set_active_id(persona.id)
         self.log(f"persona -> {persona.name}")
 
@@ -324,28 +362,44 @@ class Assistant:
         self._start(lambda: iter([text]), cancel_current)
 
     def _start(self, chunks: Callable[[], object], cancel_current: bool = True) -> None:
-        with self._lock:
+        """Queue an utterance. cancel_current=True replaces whatever is queued or playing; False waits its turn."""
+        with self._cond:
             if cancel_current:
-                self._cancel.set()
-            reuse = not cancel_current and not self._cancel.is_set()
-            self._cancel = cancel = self._cancel if reuse else threading.Event()
-            self._thread = threading.Thread(target=self._speak, args=(chunks, cancel), daemon=True)
-            self._thread.start()
+                self._epoch += 1
+            self._pending += 1
+            epoch = self._epoch
+        if cancel_current:
+            self.svc.out.cancel()
+        self._q.put((epoch, chunks))
 
-    def _speak(self, chunks, cancel: threading.Event) -> None:
-        with self._speech_lock:
-            self._speak_locked(chunks, cancel)
+    def _speaker_loop(self) -> None:
+        while True:
+            epoch, chunks = self._q.get()
+            hold = time.monotonic() + 15  # safety cap so a stuck overlay can never mute Raven forever
+            while self._listening and epoch == self._epoch and time.monotonic() < hold:
+                time.sleep(0.05)  # when the user's message lands, barge_in drops this; a stray tap lets it play
+            try:
+                if epoch == self._epoch:  # skip anything that was cancelled while it waited
+                    self._speak(chunks, epoch)
+            except Exception as e:  # nothing may ever kill this thread: a dead speaker mutes Raven for good
+                self._speak_error = f"{type(e).__name__}: {e}"
+                self.log(f"[error] speech job failed: {self._speak_error}")
+            finally:
+                with self._cond:
+                    self._pending -= 1
+                    self._cond.notify_all()
 
-    def _speak_locked(self, chunks, cancel: threading.Event) -> None:
+    def _speak(self, chunks, epoch: int) -> None:
         persona = self.persona  # fixed for this utterance even if a switch lands mid-stream
-        gen = chunks()
+        gen = None
         try:
+            gen = chunks()
             for chunk in gen:
-                if cancel.is_set():
+                if epoch != self._epoch:
                     break
                 self.log(f"{persona.name}: {chunk}")
                 for audio in self.svc.tts.synthesize(chunk, persona.voice):
-                    if cancel.is_set():
+                    if epoch != self._epoch:
                         break
                     self.svc.out.play(audio)
         except Exception as e:
@@ -357,12 +411,7 @@ class Assistant:
                 close()
 
     def wait(self) -> None:
-        """Block until everything queued to be spoken has finished. Speech threads can start further
-        speech (Claude answering while a progress line generates), so keep joining until none is newer."""
-        while True:
-            t = self._thread
-            if t:
-                t.join()
-            if self._thread is t:
-                break
+        """Block until everything queued to be spoken has been spoken (or dropped)."""
+        with self._cond:
+            self._cond.wait_for(lambda: self._pending == 0)
         self.svc.out.wait()

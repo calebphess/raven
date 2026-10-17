@@ -30,10 +30,46 @@ _HANDBACK = re.compile(r"\b(hand (it )?back|take (it|over) back|resume (raven|th
 _STOP = re.compile(r"^(stop|be quiet|shut up|cancel|never ?mind)[.!]?$")
 
 
+# Purely conversational talk aimed at Raven itself. These must match the WHOLE utterance (after dropping
+# fillers and Raven's names), so "thanks, now run the tests" or "how's it going with the build" is not
+# swallowed here and still goes to Claude.
+_CHAT = [re.compile(p) for p in (
+    r"(hi|hello|hey|yo|howdy|good (morning|afternoon|evening|night)|hi there|hello there|hey there)( again)?",
+    r"(how are you|how are you (doing|feeling)( today| tonight| now)?|how('s| is) it going|how have you been|"
+    r"how do you feel|what'?s up|what is up|you (doing )?(ok|okay|alright)|are you (ok|okay|alright|there|awake|up)|"
+    r"how('s| is) everything|how('s| is) your (day|night|evening))",
+    r"(thanks|thank you|thanks a lot|thank you so much|thanks so much|many thanks|i appreciate (it|that|you)|cheers)",
+    r"((that was |that is |that's |this is |you did |you('re| are) )?"
+    r"(so |really |very |pretty )?(great|awesome|amazing|excellent|fantastic|wonderful|perfect|the best|brilliant|"
+    r"a (star|legend|lifesaver)|doing (great|well|good|amazing)))",
+    r"((good|nice|great|excellent|awesome|well) (job|work)|well done|nicely done|nice one|bravo|good (girl|boy))",
+    r"(i (love|like) (you|it|that|this)|love (you|it|that|this)|you rock|you'?re the best|you are the best)",
+    r"(who are you|what'?s your name|what is your name|what are you)",
+    r"(good (bot|assistant)|nice to (meet|see|hear) you|nice to have you)",
+)]
+_FILLERS = re.compile(r"\b(please|so|um|uh|well|oh|hey|hi|just|buddy|friend|pal|dear)\b")
+
+
+def is_chitchat(text: str, personas: dict[str, Persona]) -> bool:
+    """True for short, purely conversational utterances directed at Raven (greetings, how-are-you, thanks,
+    compliments). Deliberately conservative: anything with a task in it returns False."""
+    t = re.sub(r"[^a-z' ]", " ", text.lower())
+    if len(t.split()) > 12:
+        return False
+    names = {n for p in personas.values() for n in p.names()} | {"raven"}
+    for n in sorted(names, key=len, reverse=True):
+        t = re.sub(rf"\b{re.escape(n)}\b", " ", t)
+    t = " ".join(t.split())
+    bare = " ".join(_FILLERS.sub(" ", t).split())
+    return any(c.fullmatch(x) for c in _CHAT for x in {t, bare} if x)
+
+
 def match(text: str, personas: dict[str, Persona]) -> Command | None:
     t = text.strip().lower().rstrip(".!?,")
     if _STOP.match(t):
         return Command("stop")
+    if is_chitchat(text, personas):
+        return Command("chat")
     if _HANDBACK.search(t):
         return Command("handback")
     if _OPEN.search(t) and len(t.split()) <= 9:
