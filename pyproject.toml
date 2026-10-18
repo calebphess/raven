@@ -4,26 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "raven"
-version = "0.1.0"
+version = "0.2.0"
 requires-python = ">=3.10"
 dependencies = [
     "sounddevice>=0.4.6",
     "numpy>=1.24.0",
     "pynput>=1.7.6",
-    "pyperclip>=1.8.2",
     "python-dotenv>=1.0.0",
-    "elevenlabs>=1.0.0",
     "faster-whisper>=1.0.0",
     "tomli>=2.0; python_version<'3.11'",
 ]
 
 [project.optional-dependencies]
-v2 = ["llama-cpp-python>=0.3", "piper-tts>=1.3", "scipy"]
+# Raven V2 (the default): local conversation model + voices, Claude Code as the background worker.
+v2 = ["llama-cpp-python>=0.3", "piper-tts>=1.3", "scipy", "claude-agent-sdk"]
+# The desktop window and menubar app.
 ui = ["PySide6-Essentials>=6.6", "certifi"]
+# Building dist/Raven.app (scripts/build_app.py).
 app = ["pyinstaller>=6.0"]
+# `raven --legacy`: the original V1 launcher (ElevenLabs voices, typing into a Claude Code terminal).
+legacy = ["elevenlabs>=1.0.0", "pyperclip>=1.8.2"]
 
 [project.scripts]
-raven = "raven.launcher:main"
+raven = "raven2.entry:main"
 raven-speak = "raven.speak:main"
 raven-voice = "raven.voicecmd:main"
 raven2 = "raven2.cli:main"

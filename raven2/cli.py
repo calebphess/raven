@@ -90,7 +90,7 @@ def _detach(argv: list[str]) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(prog="raven2")
+    ap = argparse.ArgumentParser(prog="raven")
     ap.add_argument("--profile")
     ap.add_argument("--worker", choices=["null", "claude"], help="background agent (default: from profile; `claude` = Claude Code)")
     ap.add_argument("--cwd", help="directory Claude works in (default: current directory)")

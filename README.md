@@ -1,37 +1,64 @@
 # Raven
 
-Voice interface for Claude Code. Hold a key, talk, Claude works, then speaks back a short summary.
+A voice agent for Claude Code. You talk to a persona; a small local model answers instantly and speaks for itself, while Claude Code works in the background and hands back short, spoken answers.
 
-Speech to text: faster-whisper. Text to speech: ElevenLabs. Playback: `afplay` (macOS).
+- **Local and fast.** Speech-to-text (faster-whisper), the conversation model (llama.cpp) and the voices (Piper) all run on your machine. Claude Code is the only part that goes to the cloud.
+- **Personas.** Dottie (default), Charles and Raven are built in; Carter and Mochi are downloadable packs. Each has its own voice, personality and pacing. Say "switch to Charles", or pick one in the app.
+- **Claude does the work, in its own words.** Claude speaks through `<raven>` tags, so you hear its actual answer, kept brief and in the active persona's voice; the local model only acknowledges your request and reports progress.
+- **Take over any time.** One click opens the live session in Terminal so you can drive it by hand, and hands it back afterwards.
 
-## Install
+## Quick start
+
+```
+pip install -e ".[v2,ui]"   # on an Intel Mac read the setup notes below first
+raven                       # opens the app (needs Claude Code installed; the app checks)
+```
+
+Or build the double-clickable app: see [Raven.app](#ravenapp-macos).
+
+| Command | What it does |
+|---|---|
+| `raven` | Open the Raven app |
+| `raven chat` / `raven run` | Typed chat with spoken replies / push-to-talk in the terminal (Right ⌥ Option) |
+| `raven --worker claude --cwd <dir> run` | Same, with Claude Code working in `<dir>` |
+| `raven say "text" --persona charles` | Speak a line in a persona's voice |
+| `raven personas list` / `use` / `install` / `remove` | Manage personas |
+| `raven --legacy [claude args]` | The original V1 launcher (see below) |
+
+`raven2` is the same command under its old name. Ideas that aren't built yet live in [FUTURE_CAPABILITIES.md](FUTURE_CAPABILITIES.md); the V2 design is in [docs/V2_PLAN.md](docs/V2_PLAN.md).
+
+## Legacy (V1): `raven --legacy`
+
+The first version of Raven is still here. It runs Claude Code in your terminal in voice mode: ElevenLabs voices, Whisper typing what you say into the session, and hooks that speak plans and summaries. Start it with `raven --legacy`; anything after the flag goes to `claude`, so `raven --legacy --resume` works. It shares nothing with V2 at runtime (V2 turns the V1 hooks off for its own Claude session).
+
+### Install
 
 ```
 cp .env.example .env     # fill in ELEVENLABS_API_KEY etc.
-pip install -e .
+pip install -e ".[legacy]"
 python install.py        # installs 4 hooks; python install.py --uninstall to remove
-raven                    # starts Claude Code in voice mode
+raven --legacy           # starts Claude Code in voice mode
 ```
 
 Needs ffmpeg, plus Microphone and Input Monitoring permission for your terminal.
 
-## Use
+### Use
 
 - Hold **Right ⌥ Option**, talk, release. Your words are typed into the terminal.
 - Raven speaks a plan before acting, asks when it needs permission, and gives a short synopsis at the end. Only text in `<raven>` tags is spoken.
 - Permissions: Raven reads the request aloud. Hold the key and say yes, always, or no. No answer in 20 seconds shows the normal dialog.
 - Voices: say "list voices" or "switch to Carter". Or run `raven-voice --list` / `raven-voice Carter`.
 
-## How the pieces fit
+### How the pieces fit
 
 - `launcher.py` sets `RAVEN=1`, starts the listener, and runs `claude` with `prompts/voice_mode.md` appended to its system prompt.
 - Hooks (`prompt.py`, `speak.py`, `permission.py`) do nothing unless `RAVEN=1`, so plain `claude` sessions are untouched.
 - The active persona lives only in `~/.raven_active_voice` and is injected every turn by `prompt.py`.
 - `tts.py` is the single text-to-speech path.
 
-## Troubleshooting
+### Troubleshooting
 
-- Silence: check `ELEVENLABS_API_KEY` and that you started with `raven`, not `claude`.
+- Silence: check `ELEVENLABS_API_KEY` and that you started with `raven --legacy`, not `claude`.
 - Key does nothing: grant Input Monitoring to your terminal.
 - Hooks missing: rerun `python install.py` with the same Python that has Raven installed.
 
