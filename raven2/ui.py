@@ -32,7 +32,8 @@ ASSET_DIR = Path(__file__).resolve().parent / "assets"
 
 # Palette taken from the app icon: midnight navy surfaces, gold accent.
 THEME = {"bg": "#0b1222", "surface": "#121a2e", "elevated": "#1a2440", "border": "#243050", "text": "#e8ecf4",
-         "muted": "#8b95ab", "accent": "#e9c46a", "on_accent": "#1b1405", "error": "#ff6b6b"}
+         "muted": "#8b95ab", "accent": "#e9c46a", "on_accent": "#1b1405", "error": "#ff6b6b",
+         "frame": "#060b17", "rule": "#141f38"}  # frame: the slightly darker navy around the app; rule: hairline between sections
 _COLORS = {"working": THEME["accent"], "waiting": "#b794f6", "done": "#5fd38d", "error": THEME["error"],
            "manual": "#6cb6ff", "idle": THEME["muted"], "listening": THEME["error"], "transcribing": "#6cb6ff"}
 
@@ -41,6 +42,9 @@ def _qss() -> str:
     t = THEME
     return f"""
     QToolTip {{ background: {t['elevated']}; color: {t['text']}; border: 1px solid {t['border']}; padding: 4px 8px; }}
+    QFrame#topbar {{ background: {t['frame']}; border-bottom: 1px solid {t['rule']}; }}
+    QFrame#composerband {{ background: {t['frame']}; border-top: 1px solid {t['rule']}; border-bottom: 1px solid {t['rule']}; }}
+    QFrame#rail {{ background: {t['frame']}; }}
     QLabel#logo {{ border: 1px solid {t['border']}; border-radius: 9px; }}
     QLabel#title {{ color: {t['text']}; font-size: 17px; font-weight: 700; }}
     QFrame#pill {{ background: {t['surface']}; border: 1px solid {t['border']}; border-radius: 14px; }}
@@ -68,7 +72,7 @@ def _qss() -> str:
     QLabel#footer {{ color: {t['muted']}; font-size: 11px; }}
     QFrame#errorBox {{ background: rgba(255,107,107,0.10); border: 1px solid rgba(255,107,107,0.35); border-radius: 12px; }}
     QLabel#errorText {{ color: #ff9d9d; font-size: 12px; }}
-    QLineEdit#composer {{ background: {t['surface']}; border: 1px solid {t['border']}; border-radius: 23px;
+    QLineEdit#composer {{ background: {t['bg']}; border: 1px solid {t['border']}; border-radius: 23px;
         padding: 11px 18px; min-height: 22px; color: {t['text']}; font-size: 14px; selection-background-color: {t['accent']};
         selection-color: {t['on_accent']}; }}
     QLineEdit#composer:focus {{ border: 1px solid {t['accent']}; }}
@@ -376,15 +380,49 @@ class RavenWindow(QWidget):
         footer = _label("Hold ⌥ Option to talk", "footer", wrap=False)
         footer.setAlignment(Qt.AlignCenter)
 
-        self._lay = lay = QVBoxLayout(self)
-        lay.setContentsMargins(20, 16, 20, 14)
-        lay.setSpacing(12)
-        lay.addLayout(header)
-        lay.addLayout(statusrow)
-        lay.addWidget(self.view, 1)
-        lay.addLayout(composer)
-        lay.addWidget(self.terminal_btn)
-        lay.addWidget(footer)
+        # The window is a darker-navy frame around the content: a top bar, thin rails down both sides and along the
+        # bottom, and a band behind the input row that splits the message window from the Claude button below.
+        def rail(vertical: bool) -> QFrame:
+            r = QFrame()
+            r.setObjectName("rail")
+            r.setFixedWidth(3) if vertical else r.setFixedHeight(3)
+            return r
+
+        self.topbar = QFrame()
+        self.topbar.setObjectName("topbar")
+        self._top_lay = QVBoxLayout(self.topbar)
+        self._top_lay.setContentsMargins(17, 16, 17, 12)
+        self._top_lay.setSpacing(12)
+        self._top_lay.addLayout(header)
+        self._top_lay.addLayout(statusrow)
+
+        self.band = QFrame()
+        self.band.setObjectName("composerband")
+        band_lay = QVBoxLayout(self.band)
+        band_lay.setContentsMargins(17, 12, 17, 12)
+        band_lay.addLayout(composer)
+
+        actions = QWidget()
+        actions_lay = QVBoxLayout(actions)
+        actions_lay.setContentsMargins(17, 12, 17, 12)
+        actions_lay.setSpacing(10)
+        actions_lay.addWidget(self.terminal_btn)
+        actions_lay.addWidget(footer)
+
+        column = QVBoxLayout()
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.topbar)
+        column.addWidget(self.view, 1)
+        column.addWidget(self.band)
+        column.addWidget(actions)
+        column.addWidget(rail(False))
+        self._lay = self._outer = QHBoxLayout(self)
+        self._outer.setContentsMargins(0, 0, 0, 0)
+        self._outer.setSpacing(0)
+        self._outer.addWidget(rail(True))
+        self._outer.addLayout(column, 1)
+        self._outer.addWidget(rail(True))
 
         self.input.returnPressed.connect(self._send)
         self.send.clicked.connect(self._send)
@@ -556,8 +594,9 @@ class RavenWindow(QWidget):
                 self.persona.setText(label)
 
     def _drag_zone_bottom(self) -> int:
-        """Bottom edge of the strip you can grab to move the window: the traffic-light area plus the header row."""
-        return max(self.persona.geometry().bottom(), self.folder.geometry().top()) + 10
+        """Bottom edge of the strip you can grab to move the window: the whole top bar (traffic lights, header and
+        status row). Buttons and the persona pill inside it consume their own clicks."""
+        return self.topbar.geometry().bottom()
 
     def mousePressEvent(self, e) -> None:
         """With the native title bar hidden, Qt's content covers the drag strip, so moving the window is ours to
@@ -596,9 +635,9 @@ class RavenWindow(QWidget):
             QTimer.singleShot(0, self._style_chrome)
 
     def _style_chrome(self) -> None:
-        if macwin.unify_titlebar(self, THEME["bg"]):
-            m = self._lay.contentsMargins()  # the content now runs under the title bar: clear the traffic lights
-            self._lay.setContentsMargins(m.left(), m.top() + 26, m.right(), m.bottom())
+        if macwin.unify_titlebar(self, THEME["frame"]):
+            m = self._top_lay.contentsMargins()  # the content now runs under the title bar: clear the traffic lights
+            self._top_lay.setContentsMargins(m.left(), m.top() + 26, m.right(), m.bottom())
 
     def closeEvent(self, e) -> None:
         """Closing the window quits Raven, as people expect. (Hiding instead left an invisible process running

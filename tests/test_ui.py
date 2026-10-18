@@ -299,7 +299,7 @@ def test_title_bar_styling_is_a_safe_noop_off_the_cocoa_platform(ui):
     assert qapp.platformName() == "offscreen"
     assert macwin.force_dark_appearance() is False and macwin.unify_titlebar(win, THEME["bg"]) is False
     win.show(); qapp.processEvents(); qapp.processEvents()                       # showEvent -> _style_chrome path
-    assert win._chrome_styled and win._lay.contentsMargins().top() == 16          # no extra room reserved when unstyled
+    assert win._chrome_styled and win._top_lay.contentsMargins().top() == 16      # no extra room reserved when unstyled
 
 
 def test_chat_clear_returns_to_the_empty_state(ui):
@@ -393,3 +393,70 @@ def test_icons_are_clean_cutouts_with_no_opaque_corners_or_holes():
         assert img.pixelColor(w // 2, w // 2).alpha() == 255, name
         holes = sum(1 for y in range(40, w - 40, 5) for x in range(40, w - 40, 5) if img.pixelColor(x, y).alpha() < 250)
         assert holes < 40, (name, holes)   # inside the shape, nothing see-through (the old art had transparent holes)
+
+
+# ── the darker-navy frame ──
+def lum(hex_):
+    return 0.299 * int(hex_[1:3], 16) + 0.587 * int(hex_[3:5], 16) + 0.114 * int(hex_[5:7], 16)
+
+
+def test_frame_is_a_slightly_darker_navy_than_the_content():
+    assert lum(THEME["frame"]) < lum(THEME["bg"])                                   # darker...
+    assert lum(THEME["bg"]) - lum(THEME["frame"]) < 12                              # ...but only slightly
+    f = THEME["frame"]
+    assert int(f[5:7], 16) > int(f[1:3], 16) * 2                                    # still navy (blue well above red), not grey/black
+
+
+def test_top_bar_wraps_the_header_and_status_and_is_the_whole_drag_strip(ui):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    assert win.topbar.objectName() == "topbar"
+    for child in (win.persona, win.status, win.folder):
+        assert win.topbar.isAncestorOf(child)
+    assert win._drag_zone_bottom() == win.topbar.geometry().bottom()
+    assert win.topbar.geometry().top() == 0 and win.topbar.width() == win.width() - 6   # spans between the two rails
+
+
+def test_thin_rails_run_down_both_sides_and_along_the_bottom(ui):
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    rails = [f for f in win.findChildren(QFrame) if f.objectName() == "rail"]
+    sides = [r for r in rails if r.width() == 3 and r.height() > 100]
+    bottom = [r for r in rails if r.height() == 3 and r.width() > 100]
+    assert len(sides) == 2 and len(bottom) == 1
+    assert sorted(r.geometry().left() for r in sides) == [0, win.width() - 3]       # hugging the left and right edges
+    assert all(r.height() == win.height() for r in sides)                           # full height, beside the top bar too
+    assert bottom[0].geometry().bottom() == win.height() - 1
+
+
+def test_a_band_splits_the_message_window_from_the_claude_button(ui):
+    """Message window / input band / Claude button, top to bottom."""
+    qapp, win, a, w, opened, bridge = ui
+    win.show(); qapp.processEvents()
+    assert win.band.objectName() == "composerband"
+    assert win.band.isAncestorOf(win.input) and win.band.isAncestorOf(win.send)
+    assert not win.band.isAncestorOf(win.terminal_btn)
+    top = lambda wdg: wdg.mapTo(win, wdg.rect().topLeft()).y()
+    bottom = lambda wdg: top(wdg) + wdg.height()
+    assert top(win.topbar) < bottom(win.topbar) <= top(win.view) < bottom(win.view) <= top(win.band)
+    assert bottom(win.band) <= top(win.terminal_btn)
+
+
+def test_native_window_color_matches_the_frame_so_edges_blend(ui, monkeypatch):
+    from raven2 import macwin
+    qapp, win, a, w, opened, bridge = ui
+    seen = []
+    monkeypatch.setattr(macwin, "unify_titlebar", lambda w_, color: seen.append(color) or False)
+    win._chrome_styled = False
+    win._style_chrome()
+    assert seen == [THEME["frame"]]
+
+
+def test_traffic_light_room_is_added_inside_the_top_bar(ui, monkeypatch):
+    from raven2 import macwin
+    qapp, win, a, w, opened, bridge = ui
+    before = win._top_lay.contentsMargins().top()
+    monkeypatch.setattr(macwin, "unify_titlebar", lambda w_, color: True)          # pretend we're on a real Cocoa window
+    win._style_chrome()
+    assert win._top_lay.contentsMargins().top() == before + 26
+    assert win._outer.contentsMargins().top() == 0                                  # rails and content are not pushed down
