@@ -40,8 +40,8 @@ TARGET_PEAK = 0.85
 
 
 class PiperTTS:
-    def __init__(self, speed: float = 1.3, **_):
-        # Global speaking-rate multiplier on top of each persona's own pacing: 1.3 = the audio is 30% shorter.
+    def __init__(self, speed: float = 1.2, **_):
+        # Global speaking-rate multiplier on top of each persona's own pacing: 1.2 = the audio is 20% shorter.
         self.speed = max(0.5, min(float(speed), 2.0))
         self._voices: dict[str, object] = {}
         self._gains: dict[str, float] = {}

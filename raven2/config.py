@@ -23,7 +23,7 @@ PROFILES: dict[str, dict] = {
     "intel-cpu": {
         "stt": {"backend": "faster-whisper", "model": "base", "compute_type": "int8"},
         "llm": {"backend": "llama-cpp", "model": "Llama-3.2-1B-Instruct-Q4_K_M.gguf", "n_ctx": 2048},
-        "tts": {"backend": "piper", "speed": 1.3},  # speaking-rate multiplier (1.0 = natural)
+        "tts": {"backend": "piper", "speed": 1.2},  # speaking-rate multiplier (1.0 = natural)
         "audio_out": {"backend": "sounddevice"},
         "worker": {"backend": "null"},
         "ack": "generated",  # or "canned": persona lines, instant, no model call
@@ -31,7 +31,7 @@ PROFILES: dict[str, dict] = {
     "apple-silicon": {
         "stt": {"backend": "faster-whisper", "model": "small", "compute_type": "int8"},
         "llm": {"backend": "llama-cpp", "model": "Llama-3.2-3B-Instruct-Q4_K_M.gguf", "n_ctx": 4096, "n_gpu_layers": -1},
-        "tts": {"backend": "piper", "speed": 1.3},  # speaking-rate multiplier (1.0 = natural)
+        "tts": {"backend": "piper", "speed": 1.2},  # speaking-rate multiplier (1.0 = natural)
         "audio_out": {"backend": "sounddevice"},
         "worker": {"backend": "null"},
         "ack": "generated",

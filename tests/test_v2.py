@@ -1144,10 +1144,10 @@ def test_length_divisor_delivers_the_requested_real_speedup():
     assert length_divisor(50) == length_divisor(2.0) and length_divisor(0.01) == length_divisor(0.5)   # bounded
 
 
-def test_default_speed_is_30_percent_faster(monkeypatch):
+def test_default_speed_is_20_percent_faster(monkeypatch):
     from raven2.backends.piper_tts import length_divisor
     cfg, tts = _capture_piper(monkeypatch, length_scale=1.0)
-    assert tts.speed == 1.3 and cfg.length_scale == pytest.approx(1 / length_divisor(1.3)) and cfg.length_scale < 0.75
+    assert tts.speed == 1.2 and cfg.length_scale == pytest.approx(1 / length_divisor(1.2)) and cfg.length_scale < 0.85
 
 
 def test_personas_keep_their_relative_pacing(monkeypatch):
@@ -1170,7 +1170,7 @@ def test_pitch_shift_still_does_not_change_speed(monkeypatch):
 
 def test_default_profile_sets_the_speed_and_config_can_override_it(tmp_path):
     from raven2 import config
-    assert config.load_profile("intel-cpu", path=tmp_path / "none.toml")["tts"]["speed"] == 1.3
+    assert config.load_profile("intel-cpu", path=tmp_path / "none.toml")["tts"]["speed"] == 1.2
     (tmp_path / "c.toml").write_text('[tts]\nspeed = 1.0\n')
     prof = config.load_profile("intel-cpu", path=tmp_path / "c.toml")
     assert prof["tts"]["speed"] == 1.0 and prof["tts"]["backend"] == "piper"

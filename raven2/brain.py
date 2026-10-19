@@ -133,10 +133,13 @@ class Brain:
 
     _ACK_SHOTS = [
         ("Explain what this project is about.", "Scanning the project files."),
-        ("Why is the build failing?", "Checking the build output."),
+        ("Why is the build failing?", "Reading the build output."),
         ("Commit this to git.", "Looking at the git status."),
         ("Add a dark mode to the settings page.", "Finding the settings code."),
-        ("What's the weather in Denver?", "Looking that up."),
+        ("Rename the config file.", "On it, locating the config."),
+        ("Are there any TODOs left in the code?", "Searching the code for TODOs."),
+        ("Look something up for me.", "Let me look into that."),
+        ("Run the tests.", "Running the test suite."),
     ]
 
     def _ack_messages(self, text: str = "Explain what this project is about.") -> list[dict]:
@@ -156,7 +159,7 @@ class Brain:
         """Instant, in-voice acknowledgement that assumes the first step ("Scanning the project").
         A reply that states a result or doesn't sound like work starting is dropped (caller falls back
         to a canned persona line); a *wrong guess* is fine, since Claude acts on the raw request."""
-        out = "".join(self.llm.stream(self._ack_messages(text), max_tokens=18, temperature=0.7)).replace('"', "").strip()
+        out = "".join(self.llm.stream(self._ack_messages(text), max_tokens=18, temperature=0.9)).replace('"', "").strip()
         if not out or len(out.split()) > 9 or self._CLAIM.search(out) or not self._ACTION.search(out) \
                 or self._STATEMENT.search(out):
             return
